@@ -1,0 +1,37 @@
+.venv/
+.vscode/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+*.log
+*.pot
+*.mo
+*.swp
+*.swo
+*.class
+.DS_Store
+.ipynb_checkpoints/
+
+# Python package build artifacts
+build/
+dist/
+*.egg-info/
+
+# Model and data artifacts
+**/models/
+**/*.pkl
+**/*.pt
+**/*.bin
+**/*.cache
+**/logs/
+**/results/
+
+# Virtual environments
+venv/
+*/venv/
+
+# Jupyter
+*.ipynb_checkpoints
