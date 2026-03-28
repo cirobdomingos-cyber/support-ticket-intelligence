@@ -1,40 +1,112 @@
 # Support Ticket Intelligence
 
-This monorepo contains an end-to-end support ticket intelligence ecosystem built around synthetic ticket generation, automated routing, and semantic search.
+An end-to-end AI platform for technical support operations — built from real-world experience
+supporting heavy truck fleets across Latin America.
+
+This project combines **automated ticket routing**, **semantic case retrieval**, and
+**analytics dashboards** into a modular system designed to replace reactive, manual
+support workflows with data-driven intelligence.
+
+---
+
+## The Problem
+
+Enterprise technical support systems are good at recording cases. They are bad at everything
+else: routing tickets to the right team, surfacing similar past issues, detecting emerging
+failure patterns, or giving managers real visibility into operations.
+
+This platform is the secondary intelligence layer that fixes that.
+
+---
 
 ## Architecture
+```
+Dataset generation  →  ML routing  +  Semantic search  →  REST API  →  Dashboard
+   (synthetic)          (classifier)    (FAISS embeddings)  (FastAPI)   (Streamlit)
+```
 
-- `support-ticket-dataset/`
-  - Generates a synthetic support ticket dataset.
-  - Includes ticket metadata, descriptions, lifecycle timestamps, and routing labels.
+### Modules
 
-- `support-ticket-routing-ml/`
-  - Implements machine learning baselines for automatic ticket routing.
-  - Includes text classification and metadata-driven routing models.
+| Module | Description | Status |
+|---|---|---|
+| `1-dataset` | Synthetic support ticket generator with metadata, VIN, dealer info, lifecycle labels | ✅ Complete |
+| `2-routing-ml` | Text classification baselines: TF-IDF + LogReg, XGBoost, DistilBERT | ✅ Baselines working |
+| `3-semantic-search` | Sentence embeddings + FAISS index for similar case retrieval | ✅ Working |
+| `4-api` | FastAPI service exposing routing and search as REST endpoints | 🔄 In progress |
+| `5-dashboard` | Streamlit KPI dashboard with routing insights and case analytics | 📅 Planned |
 
-- `support-ticket-semantic-search/`
-  - Implements semantic similarity search for support tickets.
-  - Builds embeddings and a FAISS index over ticket descriptions.
+---
 
-## Purpose
+## Quick Start
+```bash
+git clone https://github.com/cirobdomingos-cyber/support-ticket-intelligence
+cd support-ticket-intelligence
+pip install -r requirements.txt
 
-This repository is designed as a single GitHub project containing the full support ticket intelligence stack. The root README gives the architecture and high-level flow, while each subfolder has its own detailed README and code.
+# Generate dataset
+python 1-dataset/generate_dataset.py
 
-## Quick start
+# Train routing models
+python 2-routing-ml/train_baselines.py
 
-1. Clone the repository.
-2. Inspect each subproject:
-   - `support-ticket-dataset/`
-   - `support-ticket-routing-ml/`
-   - `support-ticket-semantic-search/`
-3. Follow the individual README instructions in each folder.
+# Run semantic search
+python 3-semantic-search/semantic_search.py
+```
 
-## Workflow
+---
 
-1. Generate or inspect data in `support-ticket-dataset/`.
-2. Train and evaluate routing models in `support-ticket-routing-ml/`.
-3. Build the semantic search index in `support-ticket-semantic-search/`.
+## Design Decisions
 
-## Notes
+**Why synthetic data?**
+Real support ticket data is proprietary and contains sensitive vehicle and customer
+information. The synthetic generator is designed to replicate realistic distributions
+of ticket types, team assignments, and metadata — making it useful for pipeline
+development and model architecture validation without exposing production data.
 
-This repository is intended to be pushed to a new GitHub repo named `support-ticket-intelligence` so the full ecosystem is available from one remote link.
+Accuracy metrics on this dataset reflect dataset structure, not real-world generalization.
+The value of this project is the **architecture and pipeline**, not the benchmark numbers.
+
+**Why multiple model approaches?**
+TF-IDF + LogReg gives a fast, interpretable baseline. XGBoost handles structured metadata
+features. DistilBERT captures semantic nuance in free-text descriptions. Comparing all three
+makes the tradeoffs explicit — latency vs accuracy vs explainability.
+
+**Why FAISS?**
+Support engineers waste significant time re-solving problems that have already been solved.
+Vector similarity search lets an engineer query a new ticket and instantly retrieve the
+5 most similar past cases — including resolution steps.
+
+---
+
+## Roadmap
+
+- [x] Synthetic dataset generation
+- [x] Text classification baselines (TF-IDF, XGBoost)
+- [x] Semantic similarity search (FAISS)
+- [ ] Fix DistilBERT training and save pipeline
+- [ ] FastAPI service with `/route` and `/search` endpoints
+- [ ] Docker containerization
+- [ ] Streamlit dashboard (KPIs, routing analytics, case explorer)
+- [ ] LLM-assisted response suggestion (LangChain + OpenAI)
+- [ ] CI/CD with GitHub Actions
+
+---
+
+## Background
+
+This project grew out of 6 years spent in heavy truck technical support, followed by
+another 6 years building data solutions for the same domain. The gap between what support
+systems *record* and what they *enable* is large — and entirely solvable with modern
+ML and search tooling.
+
+---
+
+## Tech Stack
+
+`Python` · `scikit-learn` · `XGBoost` · `Transformers (DistilBERT)` · `SentenceTransformers`
+· `FAISS` · `FastAPI` · `Streamlit` · `Docker` · `pandas` · `GitHub Actions`
+
+---
+
+*Built by [Ciro Beduschi Domingos](https://www.linkedin.com/in/seu-linkedin) —
+Senior Data & AI Professional with 15 years at Volvo Trucks.*
