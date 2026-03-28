@@ -108,5 +108,5 @@ ML and search tooling.
 
 ---
 
-*Built by [Ciro Beduschi Domingos](https://www.linkedin.com/in/seu-linkedin) —
+*Built by [Ciro Beduschi Domingos](https://www.linkedin.com/in/ciro-beduschi-domingos-209b5138/) —
 Senior Data & AI Professional with 15 years at Volvo Trucks.*
