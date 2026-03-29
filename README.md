@@ -76,6 +76,13 @@ Support engineers waste significant time re-solving problems that have already b
 Vector similarity search lets an engineer query a new ticket and instantly retrieve the
 5 most similar past cases — including resolution steps.
 
+**Why text features outperform metadata features for routing?**
+In this synthetic dataset, ticket descriptions contain domain-specific vocabulary 
+that directly maps to teams (e.g. "fuel injector" → Powertrain Diagnostics). 
+Metadata features (timestamps, dealer info, VIN structure) carry no routing signal 
+in synthetic data — in production, metadata such as vehicle model, mileage, and 
+dealer region would likely improve routing significantly.
+
 ---
 
 ## Roadmap
