@@ -534,7 +534,7 @@ def show_setup_training() -> None:
 
 
 def show_ticket_routing() -> None:
-    st.header("Ticket Routing")
+    st.header("Route")
     description = st.text_area("Ticket description", height=180)
     route_button = st.button("Route Ticket")
 
@@ -569,50 +569,9 @@ def show_ticket_routing() -> None:
             except Exception as exc:
                 st.error(f"Unexpected error: {exc}")
 
-    st.markdown("---")
-    st.subheader("AI Response Suggestion")
-    suggest_description = st.text_area(
-        "Ticket description for AI suggestion",
-        height=180,
-        key="ai_suggest_description",
-    )
-    suggest_button = st.button("Generate AI Response", key="generate_ai_response")
-
-    if suggest_button:
-        if not suggest_description.strip():
-            st.error("Please enter a ticket description before generating an AI response.")
-            return
-
-        with st.spinner("Generating AI response suggestion..."):
-            try:
-                payload = call_suggest(suggest_description.strip())
-                llm_available = bool(payload.get("llm_available", False))
-                suggested_response = str(payload.get("suggested_response", "")).strip()
-                context_tickets = payload.get("context_tickets", [])
-
-                if llm_available:
-                    with st.container(border=True):
-                        st.markdown("#### Suggested Agent Response")
-                        st.write(suggested_response)
-                else:
-                    st.info("Configure OPENAI_API_KEY in Railway environment to enable AI suggestions")
-                    if suggested_response:
-                        st.caption(suggested_response)
-
-                if isinstance(context_tickets, list) and context_tickets:
-                    st.markdown("**Context tickets used**")
-                    for ticket in context_tickets:
-                        render_ticket_card(ticket)
-            except requests.exceptions.HTTPError as exc:
-                st.error(f"API error: {exc.response.text}")
-            except requests.exceptions.RequestException as exc:
-                st.error(f"Connection error: {exc}")
-            except Exception as exc:
-                st.error(f"Unexpected error: {exc}")
-
 
 def show_similar_cases() -> None:
-    st.header("Similar Cases")
+    st.header("Search")
     query = st.text_area("Query description", height=180)
     top_k = st.slider("Top K results", min_value=1, max_value=10, value=5)
     search_button = st.button("Find Similar Cases")
@@ -639,8 +598,52 @@ def show_similar_cases() -> None:
                 st.error(f"Unexpected error: {exc}")
 
 
+def show_ai_suggestions() -> None:
+    st.header("AI Suggestions")
+    st.caption("Generate AI-powered response suggestions for support tickets using semantic search context + LLM")
+
+    description = st.text_area(
+        "Describe the support ticket",
+        height=180,
+        key="ai_suggestions_description",
+    )
+    generate_button = st.button("Generate AI Response", key="ai_suggestions_button")
+
+    if generate_button:
+        if not description.strip():
+            st.error("Please enter a ticket description before generating an AI response.")
+            return
+
+        with st.spinner("Generating AI response suggestion..."):
+            try:
+                payload = call_suggest(description.strip())
+                llm_available = bool(payload.get("llm_available", False))
+                suggested_response = str(payload.get("suggested_response", "")).strip()
+                context_tickets = payload.get("context_tickets", [])
+
+                if llm_available:
+                    with st.container(border=True):
+                        st.markdown("#### Suggested Agent Response")
+                        st.write(suggested_response)
+                else:
+                    st.info("Add a free HUGGINGFACEHUB_API_TOKEN from huggingface.co to enable AI suggestions")
+                    if suggested_response:
+                        st.caption(suggested_response)
+
+                if isinstance(context_tickets, list) and context_tickets:
+                    st.markdown("**Context tickets used**")
+                    for ticket in context_tickets:
+                        render_ticket_card(ticket)
+            except requests.exceptions.HTTPError as exc:
+                st.error(f"API error: {exc.response.text}")
+            except requests.exceptions.RequestException as exc:
+                st.error(f"Connection error: {exc}")
+            except Exception as exc:
+                st.error(f"Unexpected error: {exc}")
+
+
 def show_kpi_analytics() -> None:
-    st.header("KPI Analytics")
+    st.header("KPI")
 
     try:
         df = load_dataset()
@@ -736,18 +739,20 @@ def main() -> None:
 
     available_pages = ["Setup & Training"]
     if modules_ready:
-        available_pages += ["Ticket Routing", "Similar Cases", "KPI Analytics"]
+        available_pages += ["KPI", "Search", "Route", "AI Suggestions"]
 
     page = st.sidebar.radio("Navigation", available_pages)
 
     if page == "Setup & Training":
         show_setup_training()
-    elif page == "Ticket Routing":
-        show_ticket_routing()
-    elif page == "Similar Cases":
-        show_similar_cases()
-    else:
+    elif page == "KPI":
         show_kpi_analytics()
+    elif page == "Search":
+        show_similar_cases()
+    elif page == "Route":
+        show_ticket_routing()
+    else:
+        show_ai_suggestions()
 
 
 if __name__ == "__main__":
