@@ -10,7 +10,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 
-API_URL = "http://localhost:8000"
+API_URL = "https://support-ticket-intelligence-production-795d.up.railway.app"
 
 DATA_FILE_CANDIDATES = [
     Path(__file__).resolve().parent.parent / "1-support-ticket-dataset" / "data" / "sample_dataset.csv",
