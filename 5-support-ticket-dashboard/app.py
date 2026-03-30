@@ -409,7 +409,25 @@ def show_setup_training() -> None:
                         status_placeholder.text(f"{payload.get('step')}: {payload.get('status')}")
                     except ValueError:
                         status_placeholder.text(raw_line)
+                response.close()
                 st.success("Training stream completed.")
+        except requests.exceptions.ChunkedEncodingError as exc:
+            # Railway/edge proxies can terminate NDJSON streams even when backend work completes.
+            status_data_after = safe_call_status()
+            models_loaded = bool(status_data_after.get("models", {}).get("loaded"))
+            faiss_exists = bool(status_data_after.get("faiss_index", {}).get("exists"))
+            if models_loaded and faiss_exists:
+                st.warning(
+                    "Training stream was interrupted by the network/proxy, "
+                    "but models and search index appear ready."
+                )
+            elif models_loaded:
+                st.warning(
+                    "Training stream was interrupted by the network/proxy, "
+                    "but routing models appear loaded. Build Search Index next."
+                )
+            else:
+                st.error(f"Training failed due to interrupted stream: {exc}")
         except requests.exceptions.HTTPError as exc:
             st.error(f"Training failed: {exc.response.text}")
         except Exception as exc:
