@@ -261,7 +261,7 @@ def save_dataset_file(file_bytes: bytes) -> tuple[Path, int, list[str]]:
 
 def _find_dataset_generator_script() -> Path | None:
     for candidate in DATASET_GENERATOR_SCRIPT_PATHS:
-        if candidate.exists():
+        if candidate.is_file():
             return candidate
     return None
 
@@ -474,19 +474,23 @@ def generate_synthetic_dataset(size: int = 50000, include_columns: list[str] | N
             selected = [str(col).strip() for col in include_columns if str(col).strip()]
             if selected:
                 command.extend(["--include-columns", ",".join(selected)])
-        process = subprocess.run(
-            command,
-            cwd=script_path.parent,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if process.returncode != 0:
-            raise RuntimeError(
-                f"Dataset generator failed: {process.returncode}\nstdout:{process.stdout}\nstderr:{process.stderr}"
+        try:
+            process = subprocess.run(
+                command,
+                cwd=str(script_path.parent) if script_path.parent.exists() else None,
+                capture_output=True,
+                text=True,
+                check=False,
             )
-        df = pd.read_csv(output_path)
-        return output_path, int(df.shape[0])
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"Dataset generator failed: {process.returncode}\nstdout:{process.stdout}\nstderr:{process.stderr}"
+                )
+            df = pd.read_csv(output_path)
+            return output_path, int(df.shape[0])
+        except FileNotFoundError:
+            # API-only deployments may not include the external dataset generator path.
+            pass
 
     row_count = _generate_synthetic_dataset_in_process(output_path, size=size, include_columns=include_columns)
     return output_path, row_count
