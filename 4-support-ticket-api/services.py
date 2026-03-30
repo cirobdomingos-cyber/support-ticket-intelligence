@@ -124,6 +124,7 @@ DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS: dict[str, str] = {
     "status_state": "status_line",
     "created_timestamp": "creation_datetime",
     "created_date": "creation_date",
+    "creation_date": "creation_date",
     "closed_timestamp": "close_datetime",
     "closed_date": "close_date",
     "reporter_country": "creator_country",
@@ -459,10 +460,12 @@ def _resolve_output_columns(columns: list[str], internal_to_public: dict[str, st
         normalized = str(column).strip()
         if not normalized:
             continue
-        if normalized in internal_to_public:
-            output_columns.append(internal_to_public[normalized])
-        elif normalized in internal_to_public.values():
+        if normalized in output_columns:
+            continue
+        if normalized in internal_to_public.values():
             output_columns.append(normalized)
+        elif normalized in internal_to_public:
+            output_columns.append(internal_to_public[normalized])
         else:
             raise ValueError(f"Unknown column for selection: {normalized}")
     if not output_columns:
