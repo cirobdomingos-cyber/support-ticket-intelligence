@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 
-API_URL = "https://support-ticket-intelligence-production-795d.up.railway.app"
+API_URL = os.getenv("API_URL", "https://support-ticket-intelligence-production-795d.up.railway.app")
 
 DATA_FILE_CANDIDATES = [
     Path(__file__).resolve().parent.parent / "1-support-ticket-dataset" / "data" / "sample_dataset.csv",
@@ -126,6 +127,13 @@ def call_status() -> dict[str, Any]:
     response = requests.get(f"{API_URL}/status", timeout=10)
     response.raise_for_status()
     return response.json()
+
+
+def safe_call_status() -> dict[str, Any]:
+    try:
+        return call_status()
+    except Exception:
+        return {}
 
 
 def upload_dataset_file(file_bytes: bytes, filename: str) -> dict[str, Any]:
@@ -562,16 +570,12 @@ def main() -> None:
     st.sidebar.write(f"{status_color} {status_text}")
     st.sidebar.write(f"API URL: `{API_URL}`")
 
-    modules_ready = False
-    try:
-        status_payload = call_status()
-        modules_ready = (
-            status_payload.get("dataset", {}).get("exists", False)
-            and status_payload.get("models", {}).get("loaded", False)
-            and status_payload.get("faiss_index", {}).get("exists", False)
-        )
-    except Exception:
-        modules_ready = False
+    status_payload = safe_call_status()
+    modules_ready = (
+        status_payload.get("dataset", {}).get("exists", False)
+        and status_payload.get("models", {}).get("loaded", False)
+        and status_payload.get("faiss_index", {}).get("exists", False)
+    )
 
     available_pages = ["Setup & Training"]
     if modules_ready:
