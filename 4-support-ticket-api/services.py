@@ -16,6 +16,9 @@ import joblib
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import LabelEncoder
 
 
 ROUTING_VECTORIZER: Any = None
@@ -31,16 +34,21 @@ SEMANTIC_SEARCH_LOADED = False
 BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = BASE_DIR.parent
 API_LOCAL_DATASET_PATH = BASE_DIR / "data" / "sample_dataset.csv"
+API_LOCAL_MODEL_DIR = BASE_DIR / "models"
+API_LOCAL_SEARCH_INDEX_PATH = API_LOCAL_MODEL_DIR / "search_index.pkl"
 
 ROUTING_MODEL_DIRS = [
+    API_LOCAL_MODEL_DIR,
     ROOT_DIR / "2-support-ticket-routing-ml" / "models",
     ROOT_DIR / "support-ticket-routing-ml" / "models",
 ]
 SEMANTIC_SEARCH_DIRS = [
+    BASE_DIR,
     ROOT_DIR / "3-support-ticket-semantic-search",
     ROOT_DIR / "support-ticket-semantic-search",
 ]
 SEARCH_INDEX_PATHS = [
+    API_LOCAL_SEARCH_INDEX_PATH,
     ROOT_DIR / "3-support-ticket-semantic-search" / "models" / "search_index.pkl",
     ROOT_DIR / "support-ticket-semantic-search" / "models" / "search_index.pkl",
 ]
@@ -517,7 +525,52 @@ def build_faiss_index() -> int:
     if not dataset_path.exists():
         raise FileNotFoundError("Dataset file not found for FAISS index build.")
     df = pd.read_csv(dataset_path)
-    return _create_search_index_from_dataframe(df)
+    vector_count = _create_search_index_from_dataframe(df)
+    API_LOCAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    with open(API_LOCAL_SEARCH_INDEX_PATH, "wb") as fp:
+        pickle.dump({"index": SEARCH_INDEX, "data": SEARCH_DATA}, fp)
+    return vector_count
+
+
+def routing_artifacts_available() -> bool:
+    try:
+        _resolve_routing_model_dir()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def train_routing_models(dataset_path: Path | None = None) -> Path:
+    if dataset_path is None:
+        dataset_path = get_dataset_path()
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset file not found for routing model training: {dataset_path}")
+
+    df = _normalize_dataset_columns(pd.read_csv(dataset_path))
+    required = {"description", "assigned_team"}
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(f"Dataset is missing required routing columns: {missing}")
+
+    text_values = df["description"].fillna("").astype(str)
+    label_values = df["assigned_team"].fillna("Unassigned").astype(str)
+    if text_values.empty or label_values.nunique() < 2:
+        raise ValueError("Dataset must contain routing training samples for at least two teams")
+
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(label_values)
+
+    vectorizer = TfidfVectorizer(max_features=5000)
+    x_features = vectorizer.fit_transform(text_values)
+
+    model = LogisticRegression(max_iter=1000)
+    model.fit(x_features, y_encoded)
+
+    API_LOCAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(vectorizer, API_LOCAL_MODEL_DIR / "vectorizer.pkl")
+    joblib.dump(model, API_LOCAL_MODEL_DIR / "lr_model.pkl")
+    joblib.dump(label_encoder, API_LOCAL_MODEL_DIR / "label_encoder.pkl")
+    return API_LOCAL_MODEL_DIR
 
 
 def _resolve_routing_model_dir() -> Path:
