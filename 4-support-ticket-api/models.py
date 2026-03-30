@@ -27,6 +27,19 @@ class SearchResult(BaseModel):
     similarity_score: float = Field(..., ge=0.0, description="Similarity score from the FAISS search")
 
 
+class SuggestRequest(BaseModel):
+    description: str = Field(..., description="Ticket description for AI response suggestion")
+
+
+class SuggestResponse(BaseModel):
+    suggested_response: str = Field(..., description="Suggested response for the support agent")
+    context_tickets: list[SearchResult] = Field(
+        default_factory=list,
+        description="Top similar tickets used as context for generation",
+    )
+    llm_available: bool = Field(..., description="Whether a configured LLM provider was available")
+
+
 class DatasetStatus(BaseModel):
     exists: bool = Field(..., description="Whether the dataset file exists")
     row_count: int = Field(..., ge=0, description="Number of rows in the dataset")

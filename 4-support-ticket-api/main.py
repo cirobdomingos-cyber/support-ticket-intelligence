@@ -17,6 +17,8 @@ from models import (
     RouteResponse,
     SearchRequest,
     SearchResult,
+    SuggestRequest,
+    SuggestResponse,
     StatusResponse,
     TrainResponse,
     UploadDatasetResponse,
@@ -110,6 +112,25 @@ async def search_tickets(request: SearchRequest) -> list[SearchResult]:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Search failed: {exc}",
+        )
+
+
+@app.post("/suggest", response_model=SuggestResponse)
+async def suggest_ticket_response(request: SuggestRequest) -> SuggestResponse:
+    try:
+        suggestion = services.suggest_response(request.description)
+        return SuggestResponse(**suggestion)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Suggestion generation failed: {exc}",
         )
 
 

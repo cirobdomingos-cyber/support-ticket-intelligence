@@ -159,6 +159,19 @@ def call_search(description: str, top_k: int) -> list[dict[str, Any]]:
     return response.json()
 
 
+def call_suggest(description: str) -> dict[str, Any]:
+    response = requests.post(
+        f"{API_URL}/suggest",
+        json={"description": description},
+        timeout=120,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Unexpected suggestion payload")
+    return payload
+
+
 def call_status() -> dict[str, Any]:
     response = requests.get(f"{API_URL}/status", timeout=10)
     response.raise_for_status()
@@ -549,6 +562,47 @@ def show_ticket_routing() -> None:
                     st.bar_chart(score_series)
                 else:
                     st.info("No score details were returned.")
+            except requests.exceptions.HTTPError as exc:
+                st.error(f"API error: {exc.response.text}")
+            except requests.exceptions.RequestException as exc:
+                st.error(f"Connection error: {exc}")
+            except Exception as exc:
+                st.error(f"Unexpected error: {exc}")
+
+    st.markdown("---")
+    st.subheader("AI Response Suggestion")
+    suggest_description = st.text_area(
+        "Ticket description for AI suggestion",
+        height=180,
+        key="ai_suggest_description",
+    )
+    suggest_button = st.button("Generate AI Response", key="generate_ai_response")
+
+    if suggest_button:
+        if not suggest_description.strip():
+            st.error("Please enter a ticket description before generating an AI response.")
+            return
+
+        with st.spinner("Generating AI response suggestion..."):
+            try:
+                payload = call_suggest(suggest_description.strip())
+                llm_available = bool(payload.get("llm_available", False))
+                suggested_response = str(payload.get("suggested_response", "")).strip()
+                context_tickets = payload.get("context_tickets", [])
+
+                if llm_available:
+                    with st.container(border=True):
+                        st.markdown("#### Suggested Agent Response")
+                        st.write(suggested_response)
+                else:
+                    st.info("Configure OPENAI_API_KEY in Railway environment to enable AI suggestions")
+                    if suggested_response:
+                        st.caption(suggested_response)
+
+                if isinstance(context_tickets, list) and context_tickets:
+                    st.markdown("**Context tickets used**")
+                    for ticket in context_tickets:
+                        render_ticket_card(ticket)
             except requests.exceptions.HTTPError as exc:
                 st.error(f"API error: {exc.response.text}")
             except requests.exceptions.RequestException as exc:

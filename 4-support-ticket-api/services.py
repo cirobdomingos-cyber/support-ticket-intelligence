@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pickle
 import random
 import subprocess
@@ -15,6 +16,9 @@ import faiss
 import joblib
 import numpy as np
 import pandas as pd
+from langchain.prompts import PromptTemplate
+from langchain_community.llms import HuggingFaceHub
+from langchain_openai import ChatOpenAI
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -150,6 +154,7 @@ DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS: dict[str, str] = {
 }
 
 DEFAULT_REQUIRED_INTERNAL_COLUMNS: list[str] = ["ticket_id", "description", "assigned_team"]
+SUGGEST_PROMPT_PATH = BASE_DIR / "prompts" / "suggest_response.txt"
 
 
 def _alias_config_path() -> Path:
@@ -748,3 +753,102 @@ def search_similar_tickets(description: str, top_k: int = 5) -> list[dict[str, A
         )
 
     return results
+
+
+def _load_suggest_prompt_template() -> str:
+    if SUGGEST_PROMPT_PATH.exists():
+        return SUGGEST_PROMPT_PATH.read_text(encoding="utf-8")
+    return (
+        "You are a senior support specialist. Use the similar historical tickets as context to draft a concise, "
+        "actionable response for the support agent.\n\n"
+        "Current ticket:\n{ticket_description}\n\n"
+        "Similar historical tickets:\n{context_tickets}\n\n"
+        "Write a suggested response with:\n"
+        "1) Diagnosis summary\n"
+        "2) Immediate steps\n"
+        "3) Follow-up recommendation\n"
+    )
+
+
+def _format_context_tickets(tickets: list[dict[str, Any]]) -> str:
+    if not tickets:
+        return "No similar historical tickets were found."
+
+    lines: list[str] = []
+    for idx, ticket in enumerate(tickets, start=1):
+        lines.append(
+            f"{idx}. ticket_id={ticket.get('ticket_id', '-')}; "
+            f"assigned_team={ticket.get('assigned_team', '-')}; "
+            f"similarity_score={float(ticket.get('similarity_score', 0.0)):.4f}; "
+            f"description={ticket.get('description', '')}"
+        )
+    return "\n".join(lines)
+
+
+def _create_llm_client() -> tuple[Any | None, bool, str | None]:
+    provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+
+    if provider == "openai":
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            return None, False, "OPENAI_API_KEY is not configured"
+        model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        return ChatOpenAI(model=model_name, temperature=0.2), True, None
+
+    if provider in {"huggingface", "hf", "huggingfacehub"}:
+        hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN", "").strip()
+        if not hf_token:
+            return None, False, "HUGGINGFACEHUB_API_TOKEN is not configured"
+        repo_id = os.getenv("HUGGINGFACE_REPO_ID", "google/flan-t5-large")
+        return (
+            HuggingFaceHub(
+                repo_id=repo_id,
+                huggingfacehub_api_token=hf_token,
+                model_kwargs={"temperature": 0.2, "max_new_tokens": 256},
+            ),
+            True,
+            None,
+        )
+
+    return None, False, f"Unsupported LLM_PROVIDER: {provider}"
+
+
+def suggest_response(ticket_description: str) -> dict[str, Any]:
+    description = (ticket_description or "").strip()
+    if not description:
+        raise ValueError("Ticket description must not be empty")
+
+    context_tickets = search_similar_tickets(description, top_k=3)
+    llm, llm_available, unavailable_reason = _create_llm_client()
+
+    if not llm_available or llm is None:
+        return {
+            "suggested_response": (
+                "AI response suggestion is available after configuring an LLM API key. "
+                f"Reason: {unavailable_reason}."
+            ),
+            "context_tickets": context_tickets,
+            "llm_available": False,
+        }
+
+    prompt_template_text = _load_suggest_prompt_template()
+    prompt_template = PromptTemplate.from_template(prompt_template_text)
+    prompt = prompt_template.format(
+        ticket_description=description,
+        context_tickets=_format_context_tickets(context_tickets),
+    )
+
+    llm_output = llm.invoke(prompt)
+    if hasattr(llm_output, "content"):
+        suggested_response = str(llm_output.content).strip()
+    else:
+        suggested_response = str(llm_output).strip()
+
+    if not suggested_response:
+        suggested_response = "No suggestion returned by the language model."
+
+    return {
+        "suggested_response": suggested_response,
+        "context_tickets": context_tickets,
+        "llm_available": True,
+    }
