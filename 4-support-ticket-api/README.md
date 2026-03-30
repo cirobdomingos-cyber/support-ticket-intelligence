@@ -64,7 +64,7 @@ Builds or rebuilds the FAISS index from the currently available dataset.
 Generates an AI response suggestion for a support agent using:
 - Semantic search context (top 3 similar tickets)
 - A prompt template in prompts/suggest_response.txt
-- A configurable LLM provider (OpenAI or HuggingFace)
+- A HuggingFace-hosted instruction model
 
 ## Endpoints
 
@@ -137,23 +137,16 @@ Response body:
 
 Set these in Railway service Variables to enable AI suggestions.
 
-### OpenAI (default)
+### HuggingFace Hub
 
 ```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=your_openai_api_key
-OPENAI_MODEL=gpt-4o-mini
-```
-
-### HuggingFace Hub (optional alternative)
-
-```env
-LLM_PROVIDER=huggingface
 HUGGINGFACEHUB_API_TOKEN=your_huggingface_token
-HUGGINGFACE_REPO_ID=google/flan-t5-large
+HUGGINGFACE_REPO_ID=mistralai/Mistral-7B-Instruct-v0.2
 ```
 
-If keys are missing, the API returns a graceful fallback with llm_available=false.
+You can create a free token at huggingface.co/settings/tokens.
+
+If the token is missing, the API returns a graceful fallback with llm_available=false.
 
 ## Notes
 

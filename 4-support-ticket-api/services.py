@@ -783,39 +783,26 @@ def _format_context_tickets(tickets: list[dict[str, Any]]) -> str:
 
 
 def _create_llm_client() -> tuple[Any | None, bool, str | None]:
-    provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+    hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN", "").strip()
+    if not hf_token:
+        return None, False, "HUGGINGFACEHUB_API_TOKEN is not configured"
 
-    if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        if not api_key:
-            return None, False, "OPENAI_API_KEY is not configured"
-        try:
-            from langchain_openai import ChatOpenAI
-        except Exception:
-            return None, False, "LangChain OpenAI packages are not installed"
-        model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        return ChatOpenAI(model=model_name, temperature=0.2), True, None
+    try:
+        from langchain_huggingface import HuggingFaceEndpoint
+    except Exception:
+        return None, False, "LangChain HuggingFace packages are not installed"
 
-    if provider in {"huggingface", "hf", "huggingfacehub"}:
-        hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN", "").strip()
-        if not hf_token:
-            return None, False, "HUGGINGFACEHUB_API_TOKEN is not configured"
-        try:
-            from langchain_community.llms import HuggingFaceHub
-        except Exception:
-            return None, False, "LangChain community packages are not installed"
-        repo_id = os.getenv("HUGGINGFACE_REPO_ID", "google/flan-t5-large")
-        return (
-            HuggingFaceHub(
-                repo_id=repo_id,
-                huggingfacehub_api_token=hf_token,
-                model_kwargs={"temperature": 0.2, "max_new_tokens": 256},
-            ),
-            True,
-            None,
-        )
-
-    return None, False, f"Unsupported LLM_PROVIDER: {provider}"
+    repo_id = os.getenv("HUGGINGFACE_REPO_ID", "mistralai/Mistral-7B-Instruct-v0.2")
+    return (
+        HuggingFaceEndpoint(
+            repo_id=repo_id,
+            huggingfacehub_api_token=hf_token,
+            temperature=0.2,
+            max_new_tokens=256,
+        ),
+        True,
+        None,
+    )
 
 
 def suggest_response(ticket_description: str) -> dict[str, Any]:
@@ -829,7 +816,7 @@ def suggest_response(ticket_description: str) -> dict[str, Any]:
     if not llm_available or llm is None:
         return {
             "suggested_response": (
-                "AI response suggestion is available after configuring an LLM API key. "
+                "AI response suggestion is available after configuring a HuggingFace API token. "
                 f"Reason: {unavailable_reason}."
             ),
             "context_tickets": context_tickets,
@@ -837,23 +824,10 @@ def suggest_response(ticket_description: str) -> dict[str, Any]:
         }
 
     prompt_template_text = _load_suggest_prompt_template()
-    try:
-        from langchain.prompts import PromptTemplate
-
-        prompt_template = PromptTemplate.from_template(prompt_template_text)
-        prompt = prompt_template.format(
-            ticket_description=description,
-            context_tickets=_format_context_tickets(context_tickets),
-        )
-    except Exception:
-        return {
-            "suggested_response": (
-                "AI response suggestion requires LangChain packages to be installed. "
-                "Configure dependencies and API keys to enable this feature."
-            ),
-            "context_tickets": context_tickets,
-            "llm_available": False,
-        }
+    prompt = prompt_template_text.format(
+        ticket_description=description,
+        context_tickets=_format_context_tickets(context_tickets),
+    )
 
     llm_output = llm.invoke(prompt)
     if hasattr(llm_output, "content"):

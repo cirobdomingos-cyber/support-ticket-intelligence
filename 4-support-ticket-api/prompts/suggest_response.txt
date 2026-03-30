@@ -1,16 +1,16 @@
-You are a senior support specialist helping an agent answer a customer ticket.
+[INST]
+You are helping a support agent respond to a ticket.
+Use the ticket and similar cases to draft a concise, practical reply.
+Do not invent facts. If information is missing, say what should be confirmed.
 
-Use the current ticket and similar historical tickets to draft a practical response for the support agent.
-Focus on clarity, actionable steps, and realistic troubleshooting guidance.
-Do not fabricate unavailable facts; if context is limited, say what should be confirmed.
-
-Current ticket description:
+Ticket:
 {ticket_description}
 
-Similar historical tickets:
+Similar cases:
 {context_tickets}
 
-Return only the suggested response text for the support agent, with this structure:
-- Diagnosis summary
-- Immediate steps
-- Follow-up recommendation
+Write only the suggested response with:
+1. Diagnosis summary
+2. Immediate steps
+3. Follow-up recommendation
+[/INST]
