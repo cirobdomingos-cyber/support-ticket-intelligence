@@ -44,8 +44,8 @@ async def lifespan(app: FastAPI):
     app.state.routing_models_loaded = False
     app.state.semantic_search_loaded = False
 
-    if not services.routing_artifacts_available():
-        try:
+    try:
+        if not services.routing_artifacts_available():
             dataset_path, row_count = services.generate_synthetic_dataset()
             model_dir = services.train_routing_models(dataset_path=dataset_path)
             vector_count = services.build_faiss_index()
@@ -53,8 +53,8 @@ async def lifespan(app: FastAPI):
                 "[startup] missing artifacts bootstrap complete: "
                 f"dataset={dataset_path} rows={row_count}, models={model_dir}, faiss_vectors={vector_count}"
             )
-        except Exception as exc:
-            print(f"[startup] artifact bootstrap failed: {exc}")
+    except Exception as exc:
+        print(f"[startup] artifact bootstrap failed: {exc}")
 
     try:
         services.load_models()
