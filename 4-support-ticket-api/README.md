@@ -46,6 +46,9 @@ Public alias names from the same config are also accepted.
 
 Generates a synthetic dataset using the dataset generator module.
 You can pass optional `include_columns` (internal or public names) in the request body.
+When the API is deployed without the full monorepo available (for example, an API-only Railway service),
+the endpoint falls back to an in-process generator and writes the dataset under the API service's local
+`data/sample_dataset.csv` path.
 
 ### POST /train
 

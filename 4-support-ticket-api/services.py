@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import pickle
+import random
 import subprocess
 import sys
+import uuid
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -22,9 +25,12 @@ SEMANTIC_MODEL: Any = None
 SEARCH_INDEX: Any = None
 SEARCH_DATA: pd.DataFrame | None = None
 MODELS_LOADED = False
+ROUTING_MODELS_LOADED = False
+SEMANTIC_SEARCH_LOADED = False
 
 BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = BASE_DIR.parent
+API_LOCAL_DATASET_PATH = BASE_DIR / "data" / "sample_dataset.csv"
 
 ROUTING_MODEL_DIRS = [
     ROOT_DIR / "2-support-ticket-routing-ml" / "models",
@@ -43,7 +49,55 @@ DATASET_PATHS = [
     ROOT_DIR / "support-ticket-dataset" / "data" / "sample_dataset.csv",
     ROOT_DIR / "3-support-ticket-semantic-search" / "data" / "sample_dataset.csv",
     ROOT_DIR / "support-ticket-semantic-search" / "data" / "sample_dataset.csv",
+    ROOT_DIR / "data" / "sample_dataset.csv",
+    API_LOCAL_DATASET_PATH,
 ]
+DATASET_GENERATOR_SCRIPT_PATHS = [
+    ROOT_DIR / "1-support-ticket-dataset" / "generator" / "generate_dataset.py",
+    ROOT_DIR / "support-ticket-dataset" / "generator" / "generate_dataset.py",
+    BASE_DIR / "generator" / "generate_dataset.py",
+]
+
+GENERATOR_PRODUCTS = {
+    "Engine Control Module": ["Fuel Injector", "Turbocharger", "Cooling Pump"],
+    "Transmission System": ["Gearbox", "Clutch", "Hydraulic Pump"],
+    "Electrical System": ["Battery", "Wiring Harness", "Sensors"],
+    "Brake System": ["Brake Pads", "Hydraulic Line", "ABS Sensor"],
+}
+GENERATOR_FAILURE_MODES = ["Leak", "Overheating", "Failure", "Noise", "Short Circuit", "Wear"]
+GENERATOR_SEVERITY_LEVELS = ["Low", "Medium", "High", "Critical"]
+GENERATOR_REGIONS = ["EU", "North America", "Asia", "South America"]
+GENERATOR_CUSTOMER_TYPES = ["Fleet Operator", "Independent Owner", "Dealer", "Service Partner"]
+GENERATOR_CHANNELS = ["Dealer Portal", "Email", "Phone", "Monitoring System"]
+GENERATOR_STATUS_OPTIONS = ["New", "Assigned", "In Progress", "Awaiting Parts", "Escalated", "Resolved", "Closed"]
+GENERATOR_SUB_STATUS_OPTIONS = ["Investigation", "Waiting on Customer", "Parts Ordered", "Action Required", "Completed", "Reopened"]
+GENERATOR_COUNTRIES = ["USA", "Germany", "China", "Brazil", "France", "Canada"]
+GENERATOR_DEPARTMENTS = ["Field Service", "Customer Support", "Engineering", "Quality", "Sales", "Operations"]
+GENERATOR_DEALERS = [
+    {"dealer_id": "D-1001", "dealer_name": "Northway Dealer", "dealer_country": "USA", "dealer_state": "CA", "dealer_city": "San Jose"},
+    {"dealer_id": "D-1002", "dealer_name": "EuroAuto Dealer", "dealer_country": "Germany", "dealer_state": "Bavaria", "dealer_city": "Munich"},
+    {"dealer_id": "D-1003", "dealer_name": "AsiaMotor Dealer", "dealer_country": "China", "dealer_state": "Guangdong", "dealer_city": "Shenzhen"},
+    {"dealer_id": "D-1004", "dealer_name": "AmeCar Dealer", "dealer_country": "Brazil", "dealer_state": "SP", "dealer_city": "Sao Paulo"},
+    {"dealer_id": "D-1005", "dealer_name": "CanService Dealer", "dealer_country": "Canada", "dealer_state": "ON", "dealer_city": "Toronto"},
+]
+GENERATOR_SR_TYPES = ["Technical Issue", "Warranty Claim", "Maintenance Request", "Safety Concern", "Performance Issue", "Recall Related"]
+GENERATOR_SR_AREAS = ["Engine", "Transmission", "Electrical", "Brakes", "Suspension", "Body/Chassis"]
+GENERATOR_ERROR_CODES = ["E-1001", "E-1002", "E-1003", "E-1004", "E-1005", "W-2001", "W-2002", "W-2003", "F-3001", "F-3002"]
+GENERATOR_MILEAGE_UNITS = ["km", "miles"]
+GENERATOR_ROUTING_RULES = {
+    "Fuel Injector": "Powertrain Diagnostics",
+    "Turbocharger": "Turbo Systems Team",
+    "Cooling Pump": "Cooling Systems",
+    "Gearbox": "Transmission Engineering",
+    "Clutch": "Transmission Engineering",
+    "Hydraulic Pump": "Hydraulics Team",
+    "Battery": "Electrical Systems",
+    "Wiring Harness": "Electrical Systems",
+    "Sensors": "Electronics Diagnostics",
+    "Brake Pads": "Brake Systems",
+    "Hydraulic Line": "Brake Systems",
+    "ABS Sensor": "Electronics Diagnostics",
+}
 
 DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS: dict[str, str] = {
     "ticket_uuid": "ticket_id",
@@ -143,7 +197,7 @@ def get_dataset_path() -> Path:
     try:
         return _find_existing_path(DATASET_PATHS)
     except FileNotFoundError:
-        return ROOT_DIR / "1-support-ticket-dataset" / "data" / "sample_dataset.csv"
+        return API_LOCAL_DATASET_PATH
 
 
 def get_dataset_status() -> dict[str, Any]:
@@ -205,28 +259,237 @@ def save_dataset_file(file_bytes: bytes) -> tuple[Path, int, list[str]]:
     return dataset_path, int(df.shape[0]), list(df.columns)
 
 
-def generate_synthetic_dataset(size: int = 50000, include_columns: list[str] | None = None) -> tuple[Path, int]:
-    script_path = ROOT_DIR / "1-support-ticket-dataset" / "generator" / "generate_dataset.py"
-    output_path = ROOT_DIR / "1-support-ticket-dataset" / "data" / "sample_dataset.csv"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    command = [sys.executable, str(script_path), "--size", str(size), "--output", str(output_path)]
+def _find_dataset_generator_script() -> Path | None:
+    for candidate in DATASET_GENERATOR_SCRIPT_PATHS:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _get_internal_to_public_columns() -> dict[str, str]:
+    return {internal_name: public_name for public_name, internal_name in PUBLIC_TO_INTERNAL_COLUMNS.items()}
+
+
+def _generate_vin() -> str:
+    chars = "ABCDEFGHJKLMNPRSTUVWXYZ0123456789"
+    return "".join(random.choice(chars) for _ in range(17))
+
+
+def _generate_chassis_number() -> str:
+    return f"CH{random.randint(100000, 999999)}"
+
+
+def _rand_datetime_within(days_back: int = 365) -> datetime:
+    now = datetime.now(tz=timezone.utc)
+    start = now - timedelta(days=days_back)
+    random_seconds = random.randint(0, int((now - start).total_seconds()))
+    return start + timedelta(seconds=random_seconds)
+
+
+def _typo_word(word: str) -> str:
+    if len(word) < 4:
+        return word
+    idx = random.randint(0, len(word) - 2)
+    return word[:idx] + word[idx + 1] + word[idx] + word[idx + 2 :]
+
+
+def _add_noise(text: str) -> str:
+    rules = [
+        lambda value: value.replace("please", "pls"),
+        lambda value: value.replace("vehicle", "veh"),
+        lambda value: value.replace("diagnostic", "diag"),
+        lambda value: value.replace("information", "info"),
+        lambda value: value.replace("issue", "iss"),
+        lambda value: value.replace("service", "svc"),
+    ]
+    if random.random() < 0.35:
+        for func in random.sample(rules, k=random.randint(1, 2)):
+            text = func(text)
+    if random.random() < 0.3:
+        words = text.split()
+        candidate_indexes = [i for i, word in enumerate(words) if len(word) > 3]
+        if candidate_indexes:
+            selected_index = random.choice(candidate_indexes)
+            words[selected_index] = _typo_word(words[selected_index])
+            text = " ".join(words)
+    if random.random() < 0.25:
+        text = text.replace(".", "")
+    if random.random() < 0.2:
+        suffixes = [" pls", " asap", "Need help.", "Urgent", "FYI", "WIP"]
+        text = text + random.choice(suffixes)
+    return text
+
+
+def _failure_phrase(failure_mode: str) -> str:
+    variants = {
+        "Leak": ["leak", "fluid loss", "drip", "seepage", "leaking"],
+        "Overheating": ["overheating", "running hot", "high temp", "thermal issue"],
+        "Failure": ["failure", "stopped working", "not responding", "fault"],
+        "Noise": ["noise", "rattle", "knocking", "clunking", "unusual sound"],
+        "Short Circuit": ["short circuit", "electrical fault", "spark", "power surge"],
+        "Wear": ["wear", "worn", "degraded", "abrasion", "wear out"],
+    }
+    return random.choice(variants.get(failure_mode, [failure_mode.lower()]))
+
+
+def _random_fragment() -> str:
+    fragments = [
+        "repro after warm-up.",
+        "happens intermittently.",
+        "driver says it started after service.",
+        "occurs on cold start.",
+        "no obvious warning light.",
+        "happens during idling.",
+        "customer says it is getting worse.",
+        "fault appears after long run.",
+        "needs inspection.",
+        "check asap.",
+    ]
+    return random.choice(fragments)
+
+
+def _generate_description(product: str, component: str, failure_mode: str) -> str:
+    failure_phrase = _failure_phrase(failure_mode)
+    templates = [
+        f"Customer reports {failure_phrase} at the {component.lower()} of the {product.lower()}.",
+        f"{product} {component} has {failure_phrase}, unclear if related to recent service.",
+        f"{component} seems to have {failure_phrase}; driver says it started after startup.",
+        f"Urgent: {failure_phrase} observed in {component}, maybe the {product.lower()}.",
+        f"{component} has been {failure_phrase} during operation. {random.choice(['Please check', 'Need review', 'Urgent review'])}.",
+        f"Rpt: {product} {component} showing {failure_phrase} after long run.",
+        f"There is {failure_phrase} on the {component}. {random.choice(['Still open', 'Needs parts', 'High priority'])}.",
+        f"{component} appears {failure_phrase}. {random.choice(['No error light', 'Some hesitation', 'Intermittent fault'])}.",
+        f"Review {product} {component}: possible {failure_phrase} and reduced performance.",
+        f"Found {failure_phrase} from {component}. {random.choice(['No clear root cause', 'Possible sensor issue', 'Looks like wear'])}.",
+        f"{failure_phrase.capitalize()} in {component} of the {product}. {random.choice(['Need fix asap', 'Pls advise', 'Customer waiting'])}.",
+        f"{product} {component} has {failure_phrase}; note the unusual behavior.",
+        f"{failure_phrase.capitalize()} affecting {component} on {product}. {random.choice(['Driver report', 'Customer complaint', 'Tech notes'])}.",
+    ]
+    description = random.choice(templates)
+    if random.random() < 0.4:
+        description = description + " " + _random_fragment()
+    return _add_noise(description).strip()
+
+
+def _generate_ticket(days_back: int = 365) -> dict[str, Any]:
+    product = random.choice(list(GENERATOR_PRODUCTS.keys()))
+    component = random.choice(GENERATOR_PRODUCTS[product])
+    failure_mode = random.choice(GENERATOR_FAILURE_MODES)
+    status = random.choice(GENERATOR_STATUS_OPTIONS)
+    sub_status = random.choice(GENERATOR_SUB_STATUS_OPTIONS)
+    created_at = _rand_datetime_within(days_back=days_back)
+    close_at = None
+    if status in {"Resolved", "Closed"}:
+        close_at = created_at + timedelta(days=random.randint(0, 30), hours=random.randint(0, 23))
+    dealer = random.choice(GENERATOR_DEALERS)
+
+    return {
+        "ticket_id": str(uuid.uuid4()),
+        "product": product,
+        "component": component,
+        "failure_mode": failure_mode,
+        "severity": random.choice(GENERATOR_SEVERITY_LEVELS),
+        "severity_cur": random.choice(GENERATOR_SEVERITY_LEVELS),
+        "region": random.choice(GENERATOR_REGIONS),
+        "customer_type": random.choice(GENERATOR_CUSTOMER_TYPES),
+        "ticket_channel": random.choice(GENERATOR_CHANNELS),
+        "description": _generate_description(product, component, failure_mode),
+        "assigned_team": GENERATOR_ROUTING_RULES[component],
+        "status": status,
+        "sub_status": sub_status,
+        "status_line": "Closed" if status in {"Resolved", "Closed"} else "Open",
+        "creation_datetime": created_at.isoformat(sep=" ", timespec="seconds"),
+        "creation_date": created_at.date().isoformat(),
+        "close_datetime": close_at.isoformat(sep=" ", timespec="seconds") if close_at else "",
+        "close_date": close_at.date().isoformat() if close_at else "",
+        "creator_country": random.choice(GENERATOR_COUNTRIES),
+        "creator_department": random.choice(GENERATOR_DEPARTMENTS),
+        "owner_country": random.choice(GENERATOR_COUNTRIES),
+        "owner_department": random.choice(GENERATOR_DEPARTMENTS),
+        "dealer_id": dealer["dealer_id"],
+        "dealer_name": dealer["dealer_name"],
+        "dealer_country": dealer["dealer_country"],
+        "dealer_state": dealer["dealer_state"],
+        "dealer_city": dealer["dealer_city"],
+        "time_to_close_seconds": int((close_at - created_at).total_seconds()) if close_at else "",
+        "first_queued_seconds": random.randint(0, 7200),
+        "vin_number": _generate_vin(),
+        "chassis_number": _generate_chassis_number(),
+        "mileage": random.randint(0, 500000),
+        "mileage_unit": random.choice(GENERATOR_MILEAGE_UNITS),
+        "error_code": random.choice(GENERATOR_ERROR_CODES),
+        "sr_type": random.choice(GENERATOR_SR_TYPES),
+        "sr_area": random.choice(GENERATOR_SR_AREAS),
+        "product_id": f"P-{random.randint(1000, 9999)}",
+        "chassis_serie": f"S-{random.randint(100, 999)}",
+    }
+
+
+def _generate_dataset_frame(size: int = 50000, days_back: int = 365) -> pd.DataFrame:
+    tickets = [_generate_ticket(days_back=days_back) for _ in range(size)]
+    return pd.DataFrame(tickets)
+
+
+def _resolve_output_columns(columns: list[str], internal_to_public: dict[str, str]) -> list[str]:
+    output_columns: list[str] = []
+    for column in columns:
+        normalized = str(column).strip()
+        if not normalized:
+            continue
+        if normalized in internal_to_public:
+            output_columns.append(internal_to_public[normalized])
+        elif normalized in internal_to_public.values():
+            output_columns.append(normalized)
+        else:
+            raise ValueError(f"Unknown column for selection: {normalized}")
+    if not output_columns:
+        raise ValueError("No valid columns selected for output")
+    return output_columns
+
+
+def _generate_synthetic_dataset_in_process(output_path: Path, size: int, include_columns: list[str] | None) -> int:
+    internal_to_public = _get_internal_to_public_columns()
+    dataset = _generate_dataset_frame(size=size)
+    dataset = dataset.rename(columns=internal_to_public)
+
     if include_columns:
-        selected = [str(col).strip() for col in include_columns if str(col).strip()]
-        if selected:
-            command.extend(["--include-columns", ",".join(selected)])
-    process = subprocess.run(
-        command,
-        cwd=script_path.parent,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if process.returncode != 0:
-        raise RuntimeError(
-            f"Dataset generator failed: {process.returncode}\nstdout:{process.stdout}\nstderr:{process.stderr}"
+        selected_columns = _resolve_output_columns(include_columns, internal_to_public)
+        missing_columns = [column for column in selected_columns if column not in dataset.columns]
+        if missing_columns:
+            raise ValueError(f"Configured output columns are not present in generated dataset: {missing_columns}")
+        dataset = dataset[selected_columns]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    dataset.to_csv(output_path, index=False)
+    return int(dataset.shape[0])
+
+
+def generate_synthetic_dataset(size: int = 50000, include_columns: list[str] | None = None) -> tuple[Path, int]:
+    script_path = _find_dataset_generator_script()
+    output_path = get_dataset_path()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if script_path is not None:
+        command = [sys.executable, str(script_path), "--size", str(size), "--output", str(output_path)]
+        if include_columns:
+            selected = [str(col).strip() for col in include_columns if str(col).strip()]
+            if selected:
+                command.extend(["--include-columns", ",".join(selected)])
+        process = subprocess.run(
+            command,
+            cwd=script_path.parent,
+            capture_output=True,
+            text=True,
+            check=False,
         )
-    df = pd.read_csv(output_path)
-    return output_path, int(df.shape[0])
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Dataset generator failed: {process.returncode}\nstdout:{process.stdout}\nstderr:{process.stderr}"
+            )
+        df = pd.read_csv(output_path)
+        return output_path, int(df.shape[0])
+
+    row_count = _generate_synthetic_dataset_in_process(output_path, size=size, include_columns=include_columns)
+    return output_path, row_count
 
 
 def _create_search_index_from_dataframe(df: pd.DataFrame) -> int:
@@ -272,16 +535,17 @@ def _resolve_semantic_base_dir() -> Path:
 
 
 def load_routing_resources() -> None:
-    global ROUTING_VECTORIZER, ROUTING_MODEL, LABEL_ENCODER
+    global ROUTING_VECTORIZER, ROUTING_MODEL, LABEL_ENCODER, ROUTING_MODELS_LOADED
 
     model_dir = _resolve_routing_model_dir()
     ROUTING_VECTORIZER = joblib.load(model_dir / "vectorizer.pkl")
     ROUTING_MODEL = joblib.load(model_dir / "lr_model.pkl")
     LABEL_ENCODER = joblib.load(model_dir / "label_encoder.pkl")
+    ROUTING_MODELS_LOADED = True
 
 
 def load_semantic_search_resources() -> None:
-    global SEMANTIC_MODEL, SEARCH_INDEX, SEARCH_DATA
+    global SEMANTIC_MODEL, SEARCH_INDEX, SEARCH_DATA, SEMANTIC_SEARCH_LOADED
 
     try:
         index_path = _find_existing_path(SEARCH_INDEX_PATHS)
@@ -294,15 +558,19 @@ def load_semantic_search_resources() -> None:
             SEARCH_INDEX = saved["index"]
             SEARCH_DATA = saved["data"]
             SEMANTIC_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+            SEMANTIC_SEARCH_LOADED = True
         return
 
-    data_path = _find_existing_path(DATASET_PATHS)
+    data_path = get_dataset_path()
     SEARCH_DATA = pd.read_csv(data_path)
     _create_search_index_from_dataframe(SEARCH_DATA)
+    SEMANTIC_SEARCH_LOADED = True
 
 
 def load_models() -> None:
-    global MODELS_LOADED
+    global MODELS_LOADED, ROUTING_MODELS_LOADED, SEMANTIC_SEARCH_LOADED
+    ROUTING_MODELS_LOADED = False
+    SEMANTIC_SEARCH_LOADED = False
     try:
         load_routing_resources()
         load_semantic_search_resources()
@@ -310,6 +578,21 @@ def load_models() -> None:
     except Exception as exc:
         MODELS_LOADED = False
         raise RuntimeError(f"Failed to load models: {exc}") from exc
+
+
+def sync_model_load_state() -> bool:
+    global MODELS_LOADED
+    MODELS_LOADED = ROUTING_MODELS_LOADED and SEMANTIC_SEARCH_LOADED
+    return MODELS_LOADED
+
+
+def get_model_status() -> dict[str, bool]:
+    sync_model_load_state()
+    return {
+        "routing_loaded": ROUTING_MODELS_LOADED,
+        "semantic_loaded": SEMANTIC_SEARCH_LOADED,
+        "all_loaded": MODELS_LOADED,
+    }
 
 
 def predict_route(description: str) -> tuple[str, float, dict[str, float]]:

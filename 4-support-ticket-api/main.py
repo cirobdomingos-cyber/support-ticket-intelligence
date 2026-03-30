@@ -40,13 +40,21 @@ def _normalize_dataset_columns(df: pd.DataFrame) -> pd.DataFrame:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.models_loaded = False
+    app.state.routing_models_loaded = False
+    app.state.semantic_search_loaded = False
     try:
         services.load_models()
-        app.state.models_loaded = services.MODELS_LOADED
+        state = services.get_model_status()
+        app.state.models_loaded = state["all_loaded"]
+        app.state.routing_models_loaded = state["routing_loaded"]
+        app.state.semantic_search_loaded = state["semantic_loaded"]
     except Exception as exc:
         # The app will still start, but routes will return 503 until models are fixed.
         print(f"[startup] model loading failed: {exc}")
         app.state.models_loaded = False
+        state = services.get_model_status()
+        app.state.routing_models_loaded = state["routing_loaded"]
+        app.state.semantic_search_loaded = state["semantic_loaded"]
     yield
 
 
@@ -67,10 +75,10 @@ async def health_check() -> HealthResponse:
 
 @app.post("/route", response_model=RouteResponse)
 async def route_ticket(request: RouteRequest) -> RouteResponse:
-    if not app.state.models_loaded:
+    if not app.state.routing_models_loaded:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Models are not loaded yet",
+            detail="Routing models are not loaded yet",
         )
     try:
         assigned_team, confidence, all_scores = services.predict_route(request.description)
@@ -90,10 +98,10 @@ async def route_ticket(request: RouteRequest) -> RouteResponse:
 
 @app.post("/search", response_model=list[SearchResult])
 async def search_tickets(request: SearchRequest) -> list[SearchResult]:
-    if not app.state.models_loaded:
+    if not app.state.semantic_search_loaded:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Models are not loaded yet",
+            detail="Semantic search resources are not loaded yet",
         )
     try:
         results = services.search_similar_tickets(request.description, request.top_k)
@@ -110,8 +118,9 @@ async def search_tickets(request: SearchRequest) -> list[SearchResult]:
 @app.get("/status", response_model=StatusResponse)
 def status_check() -> StatusResponse:
     dataset_status = services.get_dataset_status()
+    model_state = services.get_model_status()
     models_status = {
-        "loaded": bool(app.state.models_loaded),
+        "loaded": bool(model_state["routing_loaded"]),
         "available": services.get_routing_model_files(),
     }
     faiss_status = services.get_faiss_index_status()
@@ -165,6 +174,7 @@ def generate_dataset(request: GenerateDatasetRequest | None = None) -> GenerateD
 
 def _stream_training_process() -> "Iterator[str]":
     script_path = services.ROOT_DIR / "2-support-ticket-routing-ml" / "src" / "train_baselines.py"
+    model_dir = services.ROOT_DIR / "2-support-ticket-routing-ml" / "models"
     process = subprocess.Popen(
         [sys.executable, str(script_path)],
         cwd=str(script_path.parent),
@@ -174,7 +184,9 @@ def _stream_training_process() -> "Iterator[str]":
         bufsize=1,
     )
 
-    yield json.dumps({"step": "start", "status": "Training started."}) + "\n"
+    yield json.dumps(
+        {"step": "start", "status": f"Training started. Artifacts will be written to {model_dir}."}
+    ) + "\n"
 
     if process.stdout is None:
         yield json.dumps({"step": "error", "status": "Failed to capture training output."}) + "\n"
@@ -188,6 +200,8 @@ def _stream_training_process() -> "Iterator[str]":
             step = "training_logreg"
         elif "XGBoost:" in line:
             step = "training_xgboost"
+        elif "Models saved to" in line:
+            step = "artifacts_saved"
         elif "error" in line.lower():
             step = "error"
         else:
@@ -202,8 +216,20 @@ def _stream_training_process() -> "Iterator[str]":
     else:
         try:
             services.load_routing_resources()
-            app.state.models_loaded = services.MODELS_LOADED
-            yield json.dumps({"step": "complete", "status": "Training finished and models reloaded."}) + "\n"
+            model_state = services.get_model_status()
+            app.state.routing_models_loaded = model_state["routing_loaded"]
+            app.state.semantic_search_loaded = model_state["semantic_loaded"]
+            app.state.models_loaded = model_state["all_loaded"]
+            yield json.dumps(
+                {
+                    "step": "complete",
+                    "status": (
+                        "Training finished and models reloaded. "
+                        f"Routing models loaded: {model_state['routing_loaded']}. "
+                        f"Artifacts path: {model_dir}."
+                    ),
+                }
+            ) + "\n"
         except Exception as exc:
             yield json.dumps(
                 {"step": "complete", "status": f"Training finished but reload failed: {exc}."}
@@ -219,6 +245,11 @@ def train_models() -> StreamingResponse:
 def build_index() -> BuildIndexResponse:
     try:
         vector_count = services.build_faiss_index()
+        services.SEMANTIC_SEARCH_LOADED = True
+        model_state = services.get_model_status()
+        app.state.routing_models_loaded = model_state["routing_loaded"]
+        app.state.semantic_search_loaded = model_state["semantic_loaded"]
+        app.state.models_loaded = model_state["all_loaded"]
     except FileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     except Exception as exc:
