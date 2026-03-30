@@ -2,7 +2,7 @@
 
 An end-to-end AI prototype for support ticket automation, built as a modular
 pipeline with dataset generation, routing models, semantic search, API service,
-and dashboard visualization.
+dashboard visualization, and AI-powered response suggestions.
 
 ---
 
@@ -47,8 +47,8 @@ This repository uses numbered module folders to keep the project structure clear
 - `1-support-ticket-dataset/` — synthetic ticket data generator
 - `2-support-ticket-routing-ml/` — routing model training and inference
 - `3-support-ticket-semantic-search/` — semantic search with embeddings and FAISS
-- `4-support-ticket-api/` — FastAPI service exposing routing and search endpoints
-- `5-support-ticket-dashboard/` — Streamlit dashboard for operators and managers
+- `4-support-ticket-api/` — FastAPI service exposing routing, search, and AI suggestion endpoints
+- `5-support-ticket-dashboard/` — Streamlit dashboard for setup, KPIs, search, routing, and AI suggestions
 
 ---
 
@@ -60,6 +60,7 @@ This project proves a practical architecture for:
 
 - automatic ticket routing
 - case similarity retrieval
+- AI-assisted response drafting using similar-case context
 - API-based integration
 - lightweight analytics dashboard
 
@@ -79,8 +80,8 @@ This project proves a practical architecture for:
 | `1-support-ticket-dataset` | Synthetic dataset generation and export | ✅ Working |
 | `2-support-ticket-routing-ml` | Ticket routing model baselines and training | ✅ Working |
 | `3-support-ticket-semantic-search` | Similar-case search using embeddings and FAISS | ✅ Working |
-| `4-support-ticket-api` | FastAPI endpoints for route and search | ✅ Working |
-| `5-support-ticket-dashboard` | Streamlit dashboard for routing and analytics | ✅ Working |
+| `4-support-ticket-api` | FastAPI endpoints for route, search, train, and AI suggestions | ✅ Working |
+| `5-support-ticket-dashboard` | Streamlit dashboard for setup, KPI, search, route, and AI suggestions | ✅ Working |
 
 ---
 
@@ -141,14 +142,31 @@ streamlit run app.py
   commands.
 - Column aliases are centralized in `column_aliases.json` at repository root.
 - Update `column_aliases.json` to customize public/internal field names per company.
+- AI suggestions use a free HuggingFace token via `HUGGINGFACEHUB_API_TOKEN`.
+- The default suggestion model is `mistralai/Mistral-7B-Instruct-v0.2`.
+- Create a free token at `https://huggingface.co/settings/tokens` and add it to Railway to enable the feature.
 - The project is designed as a prototype and uses synthetic data for feature
   exploration and pipeline validation.
 
 ---
 
+## Dashboard pages
+
+The dashboard currently exposes these pages:
+
+- `Setup & Training`
+- `KPI`
+- `Search`
+- `Route`
+- `AI Suggestions`
+
+The `AI Suggestions` page generates AI-powered response suggestions for support tickets using semantic search context plus a HuggingFace-hosted LLM.
+
+---
+
 ## Tech stack
 
-`Python` · `pandas` · `scikit-learn` · `XGBoost` · `SentenceTransformers` · `FAISS` · `FastAPI` · `Streamlit` · `Docker`
+`Python` · `pandas` · `scikit-learn` · `XGBoost` · `SentenceTransformers` · `FAISS` · `FastAPI` · `Streamlit` · `LangChain` · `HuggingFace` · `Docker`
 
 ---
 
