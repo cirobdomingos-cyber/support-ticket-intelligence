@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from io import BytesIO
 from typing import Any
@@ -193,10 +192,13 @@ def generate_synthetic_dataset(include_columns: list[str]) -> dict[str, Any]:
     return response.json()
 
 
-def train_routing_models() -> requests.Response:
-    response = requests.post(f"{API_URL}/train", stream=True, timeout=None)
+def train_routing_models() -> dict[str, Any]:
+    response = requests.post(f"{API_URL}/train", timeout=3600)
     response.raise_for_status()
-    return response
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Unexpected training response payload")
+    return payload
 
 
 def build_search_index() -> dict[str, Any]:
@@ -399,35 +401,17 @@ def show_setup_training() -> None:
     if st.button("Train Routing Models", key="train_models"):
         try:
             with st.spinner("Training routing models..."):
-                response = train_routing_models()
-                status_placeholder = st.empty()
-                for raw_line in response.iter_lines(decode_unicode=True):
-                    if not raw_line:
-                        continue
-                    try:
-                        payload = json.loads(raw_line)
-                        status_placeholder.text(f"{payload.get('step')}: {payload.get('status')}")
-                    except ValueError:
-                        status_placeholder.text(raw_line)
-                response.close()
-                st.success("Training stream completed.")
-        except requests.exceptions.ChunkedEncodingError as exc:
-            # Railway/edge proxies can terminate NDJSON streams even when backend work completes.
-            status_data_after = safe_call_status()
-            models_loaded = bool(status_data_after.get("models", {}).get("loaded"))
-            faiss_exists = bool(status_data_after.get("faiss_index", {}).get("exists"))
-            if models_loaded and faiss_exists:
-                st.warning(
-                    "Training stream was interrupted by the network/proxy, "
-                    "but models and search index appear ready."
-                )
-            elif models_loaded:
-                st.warning(
-                    "Training stream was interrupted by the network/proxy, "
-                    "but routing models appear loaded. Build Search Index next."
+                result = train_routing_models()
+            if result.get("success"):
+                st.success(result.get("status", "Training completed."))
+                st.caption(
+                    "Artifacts path: "
+                    f"{result.get('artifacts_path', '-')}, "
+                    f"rows: {result.get('row_count', 0)}, "
+                    f"vectors: {result.get('vector_count', 0)}"
                 )
             else:
-                st.error(f"Training failed due to interrupted stream: {exc}")
+                st.error(result.get("status", "Training failed."))
         except requests.exceptions.HTTPError as exc:
             st.error(f"Training failed: {exc.response.text}")
         except Exception as exc:

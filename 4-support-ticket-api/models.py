@@ -72,6 +72,15 @@ class BuildIndexResponse(BaseModel):
     vector_count: int = Field(..., ge=0, description="Number of vectors indexed")
 
 
+class TrainResponse(BaseModel):
+    success: bool = Field(..., description="Whether training and reload succeeded")
+    status: str = Field(..., description="Human-readable training status")
+    dataset_generated: bool = Field(..., description="Whether a dataset was auto-generated before training")
+    row_count: int = Field(..., ge=0, description="Row count used for training")
+    vector_count: int = Field(..., ge=0, description="Vector count in the rebuilt FAISS index")
+    artifacts_path: str = Field(..., description="Path where routing model artifacts were written")
+
+
 class HealthResponse(BaseModel):
     status: str = Field(..., description="Health status")
     models_loaded: bool = Field(..., description="Whether models were successfully loaded")

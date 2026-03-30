@@ -2,13 +2,10 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from io import BytesIO
-import json
-from typing import Iterator
 
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 
 import services
 from models import (
@@ -21,6 +18,7 @@ from models import (
     SearchRequest,
     SearchResult,
     StatusResponse,
+    TrainResponse,
     UploadDatasetResponse,
 )
 
@@ -185,65 +183,47 @@ def generate_dataset(request: GenerateDatasetRequest | None = None) -> GenerateD
     return GenerateDatasetResponse(success=True, row_count=row_count)
 
 
-def _stream_training_process() -> Iterator[str]:
+def _run_training_pipeline() -> TrainResponse:
     try:
         dataset_path = services.get_dataset_path()
+        dataset_generated = False
         if not dataset_path.exists():
             dataset_path, row_count = services.generate_synthetic_dataset()
-            yield json.dumps(
-                {
-                    "step": "dataset_generated",
-                    "status": f"Generated dataset at {dataset_path} with {row_count} rows.",
-                }
-            ) + "\n"
+            dataset_generated = True
+        else:
+            row_count = int(pd.read_csv(dataset_path).shape[0])
 
         model_dir = services.train_routing_models(dataset_path=dataset_path)
-        yield json.dumps(
-            {
-                "step": "artifacts_saved",
-                "status": f"Routing models saved to {model_dir.resolve()}.",
-            }
-        ) + "\n"
 
         vector_count = services.build_faiss_index()
-        yield json.dumps(
-            {
-                "step": "index_built",
-                "status": f"FAISS index built with {vector_count} vectors.",
-            }
-        ) + "\n"
 
         services.load_routing_resources()
         model_state = services.get_model_status()
         app.state.routing_models_loaded = model_state["routing_loaded"]
         app.state.semantic_search_loaded = model_state["semantic_loaded"]
         app.state.models_loaded = model_state["all_loaded"]
-        yield json.dumps(
-            {
-                "step": "complete",
-                "status": (
-                    "Training finished and models reloaded. "
-                    f"Routing models loaded: {model_state['routing_loaded']}. "
-                    f"Artifacts path: {model_dir.resolve()}."
-                ),
-            }
-        ) + "\n"
+
+        return TrainResponse(
+            success=True,
+            status=(
+                "Training finished and models reloaded. "
+                f"Routing models loaded: {model_state['routing_loaded']}."
+            ),
+            dataset_generated=dataset_generated,
+            row_count=row_count,
+            vector_count=vector_count,
+            artifacts_path=str(model_dir.resolve()),
+        )
     except Exception as exc:
-        yield json.dumps(
-            {
-                "step": "error",
-                "status": (
-                    "Training failed before models could be reloaded: "
-                    f"{exc}."
-                ),
-            }
-        ) + "\n"
-        return
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Training failed before models could be reloaded: {exc}",
+        )
 
 
-@app.post("/train")
-def train_models() -> StreamingResponse:
-    return StreamingResponse(_stream_training_process(), media_type="application/x-ndjson")
+@app.post("/train", response_model=TrainResponse)
+def train_models() -> TrainResponse:
+    return _run_training_pipeline()
 
 
 @app.post("/build-index", response_model=BuildIndexResponse)
