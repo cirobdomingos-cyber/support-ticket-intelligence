@@ -1,9 +1,20 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.23.0
-pydantic>=2.6.0
-python-multipart>=0.0.6
-scikit-learn>=1.4.0
-pandas>=2.0.0
-joblib>=1.3.0
-sentence-transformers>=2.3.0
-faiss-cpu>=1.7.4
+# Web framework
+# Pin these to the latest compatible set. Run `pip freeze` after `pip install -r requirements.txt`
+# in a fresh environment to lock exact patch versions for your deployment.
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+pydantic==2.11.1
+python-multipart==0.0.20
+starlette==0.46.1
+
+# Data — versions pinned from project venv (pip freeze)
+pandas==3.0.1
+numpy==2.4.3
+
+# ML / routing — pinned from project venv
+scikit-learn==1.8.0
+joblib==1.5.3
+
+# Semantic search — pinned from project venv
+sentence-transformers==5.3.0
+faiss-cpu==1.13.2

@@ -76,11 +76,11 @@ This project proves a practical architecture for:
 
 | Folder | Purpose | Status |
 |---|---|---|
-| `1-support-ticket-dataset` | Synthetic dataset generation and export | ✅ Complete |
+| `1-support-ticket-dataset` | Synthetic dataset generation and export | ✅ Working |
 | `2-support-ticket-routing-ml` | Ticket routing model baselines and training | ✅ Working |
 | `3-support-ticket-semantic-search` | Similar-case search using embeddings and FAISS | ✅ Working |
-| `4-support-ticket-api` | FastAPI endpoints for route and search | 🔄 In progress |
-| `5-support-ticket-dashboard` | Streamlit dashboard for routing and analytics | 🔄 In progress |
+| `4-support-ticket-api` | FastAPI endpoints for route and search | ✅ Working |
+| `5-support-ticket-dashboard` | Streamlit dashboard for routing and analytics | ✅ Working |
 
 ---
 
