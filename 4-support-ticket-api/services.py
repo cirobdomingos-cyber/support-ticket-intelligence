@@ -594,7 +594,30 @@ def _resolve_semantic_base_dir() -> Path:
 def load_routing_resources() -> None:
     global ROUTING_VECTORIZER, ROUTING_MODEL, LABEL_ENCODER, ROUTING_MODELS_LOADED
 
-    model_dir = _resolve_routing_model_dir()
+    selected_model_dir: Path | None = None
+    for candidate in ROUTING_MODEL_DIRS:
+        vectorizer_path = candidate / "vectorizer.pkl"
+        model_path = candidate / "lr_model.pkl"
+        encoder_path = candidate / "label_encoder.pkl"
+        vectorizer_exists = vectorizer_path.exists()
+        model_exists = model_path.exists()
+        encoder_exists = encoder_path.exists()
+        print(
+            "[routing-load] "
+            f"candidate={candidate.resolve()} "
+            f"vectorizer={vectorizer_exists} model={model_exists} label_encoder={encoder_exists}"
+        )
+        if vectorizer_exists and model_exists and encoder_exists:
+            selected_model_dir = candidate
+            break
+
+    if selected_model_dir is None:
+        raise FileNotFoundError(
+            "Routing model directory not found. "
+            f"Checked candidates: {[str(path.resolve()) for path in ROUTING_MODEL_DIRS]}"
+        )
+
+    model_dir = selected_model_dir
     ROUTING_VECTORIZER = joblib.load(model_dir / "vectorizer.pkl")
     ROUTING_MODEL = joblib.load(model_dir / "lr_model.pkl")
     LABEL_ENCODER = joblib.load(model_dir / "label_encoder.pkl")

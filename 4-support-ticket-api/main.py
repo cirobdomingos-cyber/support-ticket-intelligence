@@ -3,8 +3,6 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from io import BytesIO
 import json
-import subprocess
-import sys
 from typing import Iterator
 
 import pandas as pd
@@ -187,92 +185,59 @@ def generate_dataset(request: GenerateDatasetRequest | None = None) -> GenerateD
 
 
 def _stream_training_process() -> Iterator[str]:
-    script_path = services.ROOT_DIR / "2-support-ticket-routing-ml" / "src" / "train_baselines.py"
-    model_dir = services.ROOT_DIR / "2-support-ticket-routing-ml" / "models"
-    if not script_path.is_file():
-        yield json.dumps(
-            {
-                "step": "error",
-                "status": (
-                    "Training is unavailable in this deployment because "
-                    "2-support-ticket-routing-ml/src/train_baselines.py is not present. "
-                    "Deploy the full monorepo service to enable /train."
-                ),
-            }
-        ) + "\n"
-        return
-
     try:
-        process = subprocess.Popen(
-            [sys.executable, str(script_path)],
-            cwd=str(script_path.parent) if script_path.parent.exists() else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError as exc:
-        yield json.dumps(
-            {
-                "step": "error",
-                "status": (
-                    "Training is unavailable in this API-only deployment due to missing "
-                    f"training resources: {exc}."
-                ),
-            }
-        ) + "\n"
-        return
-
-    yield json.dumps(
-        {"step": "start", "status": f"Training started. Artifacts will be written to {model_dir}."}
-    ) + "\n"
-
-    if process.stdout is None:
-        yield json.dumps({"step": "error", "status": "Failed to capture training output."}) + "\n"
-        return
-
-    for raw_line in process.stdout:
-        line = raw_line.strip()
-        if not line:
-            continue
-        if "Logistic Regression:" in line:
-            step = "training_logreg"
-        elif "XGBoost:" in line:
-            step = "training_xgboost"
-        elif "Models saved to" in line:
-            step = "artifacts_saved"
-        elif "error" in line.lower():
-            step = "error"
-        else:
-            step = "training"
-        yield json.dumps({"step": step, "status": line}) + "\n"
-
-    return_code = process.wait()
-    if return_code != 0:
-        yield json.dumps(
-            {"step": "complete", "status": f"Training failed with exit code {return_code}."}
-        ) + "\n"
-    else:
-        try:
-            services.load_routing_resources()
-            model_state = services.get_model_status()
-            app.state.routing_models_loaded = model_state["routing_loaded"]
-            app.state.semantic_search_loaded = model_state["semantic_loaded"]
-            app.state.models_loaded = model_state["all_loaded"]
+        dataset_path = services.get_dataset_path()
+        if not dataset_path.exists():
+            dataset_path, row_count = services.generate_synthetic_dataset()
             yield json.dumps(
                 {
-                    "step": "complete",
-                    "status": (
-                        "Training finished and models reloaded. "
-                        f"Routing models loaded: {model_state['routing_loaded']}. "
-                        f"Artifacts path: {model_dir}."
-                    ),
+                    "step": "dataset_generated",
+                    "status": f"Generated dataset at {dataset_path} with {row_count} rows.",
                 }
             ) + "\n"
-        except Exception as exc:
-            yield json.dumps(
-                {"step": "complete", "status": f"Training finished but reload failed: {exc}."}
-            ) + "\n"
+
+        model_dir = services.train_routing_models(dataset_path=dataset_path)
+        yield json.dumps(
+            {
+                "step": "artifacts_saved",
+                "status": f"Routing models saved to {model_dir.resolve()}.",
+            }
+        ) + "\n"
+
+        vector_count = services.build_faiss_index()
+        yield json.dumps(
+            {
+                "step": "index_built",
+                "status": f"FAISS index built with {vector_count} vectors.",
+            }
+        ) + "\n"
+
+        services.load_routing_resources()
+        model_state = services.get_model_status()
+        app.state.routing_models_loaded = model_state["routing_loaded"]
+        app.state.semantic_search_loaded = model_state["semantic_loaded"]
+        app.state.models_loaded = model_state["all_loaded"]
+        yield json.dumps(
+            {
+                "step": "complete",
+                "status": (
+                    "Training finished and models reloaded. "
+                    f"Routing models loaded: {model_state['routing_loaded']}. "
+                    f"Artifacts path: {model_dir.resolve()}."
+                ),
+            }
+        ) + "\n"
+    except Exception as exc:
+        yield json.dumps(
+            {
+                "step": "error",
+                "status": (
+                    "Training failed before models could be reloaded: "
+                    f"{exc}."
+                ),
+            }
+        ) + "\n"
+        return
 
 
 @app.post("/train")
