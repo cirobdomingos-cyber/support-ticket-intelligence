@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from io import BytesIO
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -12,11 +11,6 @@ import requests
 import streamlit as st
 
 API_URL = os.getenv("API_URL", "https://support-ticket-intelligence-production-795d.up.railway.app")
-
-DATA_FILE_CANDIDATES = [
-    Path(__file__).resolve().parent.parent / "1-support-ticket-dataset" / "data" / "sample_dataset.csv",
-    Path(__file__).resolve().parent.parent / "support-ticket-dataset" / "data" / "sample_dataset.csv",
-]
 
 DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS: dict[str, str] = {
     "ticket_uuid": "ticket_id",
@@ -27,43 +21,8 @@ DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS: dict[str, str] = {
 DEFAULT_REQUIRED_INTERNAL_COLUMNS: list[str] = ["ticket_id", "description", "assigned_team"]
 
 
-def _alias_config_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "column_aliases.json"
-
-
 def _load_alias_config() -> tuple[dict[str, str], list[str]]:
-    config_path = _alias_config_path()
-    if not config_path.exists():
-        return DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS, DEFAULT_REQUIRED_INTERNAL_COLUMNS
-    try:
-        with open(config_path, "r", encoding="utf-8") as fp:
-            payload = json.load(fp)
-    except Exception:
-        return DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS, DEFAULT_REQUIRED_INTERNAL_COLUMNS
-
-    internal_to_public = payload.get("internal_to_public", {})
-    required_columns = payload.get("required_internal_columns", DEFAULT_REQUIRED_INTERNAL_COLUMNS)
-    if not isinstance(internal_to_public, dict):
-        return DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS, DEFAULT_REQUIRED_INTERNAL_COLUMNS
-
-    public_to_internal = {
-        str(public_name): str(internal_name)
-        for internal_name, public_name in internal_to_public.items()
-        if isinstance(internal_name, str)
-        and isinstance(public_name, str)
-        and internal_name.strip()
-        and public_name.strip()
-    }
-    if not public_to_internal:
-        public_to_internal = DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS
-
-    if not isinstance(required_columns, list):
-        required_columns = DEFAULT_REQUIRED_INTERNAL_COLUMNS
-    required_internal_columns = [str(c) for c in required_columns if isinstance(c, str) and c.strip()]
-    if not required_internal_columns:
-        required_internal_columns = DEFAULT_REQUIRED_INTERNAL_COLUMNS
-
-    return public_to_internal, required_internal_columns
+    return DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS, DEFAULT_REQUIRED_INTERNAL_COLUMNS
 
 
 PUBLIC_TO_INTERNAL_COLUMNS, REQUIRED_INTERNAL_COLUMNS = _load_alias_config()
@@ -81,13 +40,21 @@ def _normalize_dataset_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_dataset() -> pd.DataFrame:
-    for path in DATA_FILE_CANDIDATES:
-        if path.exists():
-            df = pd.read_csv(path)
-            return _normalize_dataset_columns(df)
-    raise FileNotFoundError(
-        "Could not find sample dataset. Expected ../1-support-ticket-dataset/data/sample_dataset.csv or ../support-ticket-dataset/data/sample_dataset.csv"
-    )
+    status_payload = call_status()
+    dataset_status = status_payload.get("dataset", {})
+    if not bool(dataset_status.get("exists")):
+        raise FileNotFoundError(
+            "Dataset is not available yet. Use Setup & Training to upload or generate a dataset first."
+        )
+
+    response = requests.get(f"{API_URL}/dataset", params={"limit": 5000}, timeout=60)
+    response.raise_for_status()
+    rows = response.json()
+    if not isinstance(rows, list):
+        raise ValueError("Unexpected dataset payload returned from API")
+    if not rows:
+        return pd.DataFrame()
+    return _normalize_dataset_columns(pd.DataFrame(rows))
 
 
 @st.cache_data(ttl=300)

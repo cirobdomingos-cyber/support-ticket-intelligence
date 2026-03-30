@@ -224,6 +224,16 @@ def get_dataset_status() -> dict[str, Any]:
     }
 
 
+def get_dataset_rows(limit: int = 5000) -> list[dict[str, Any]]:
+    dataset_path = get_dataset_path()
+    if not dataset_path.exists():
+        raise FileNotFoundError("Dataset file not found.")
+
+    capped_limit = max(1, min(int(limit), 5000))
+    df = pd.read_csv(dataset_path, nrows=capped_limit)
+    return df.to_dict(orient="records")
+
+
 def _normalize_dataset_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {
         col: PUBLIC_TO_INTERNAL_COLUMNS[col]

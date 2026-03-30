@@ -6,7 +6,7 @@ import json
 from typing import Iterator
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -41,18 +41,6 @@ async def lifespan(app: FastAPI):
     app.state.models_loaded = False
     app.state.routing_models_loaded = False
     app.state.semantic_search_loaded = False
-
-    try:
-        if not services.routing_artifacts_available():
-            dataset_path, row_count = services.generate_synthetic_dataset()
-            model_dir = services.train_routing_models(dataset_path=dataset_path)
-            vector_count = services.build_faiss_index()
-            print(
-                "[startup] missing artifacts bootstrap complete: "
-                f"dataset={dataset_path} rows={row_count}, models={model_dir}, faiss_vectors={vector_count}"
-            )
-    except Exception as exc:
-        print(f"[startup] artifact bootstrap failed: {exc}")
 
     try:
         services.load_models()
@@ -141,6 +129,19 @@ def status_check() -> StatusResponse:
         models=models_status,
         faiss_index=faiss_status,
     )
+
+
+@app.get("/dataset")
+def get_dataset(limit: int = Query(5000, ge=1, le=5000)) -> list[dict[str, object]]:
+    try:
+        return services.get_dataset_rows(limit=limit)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Dataset retrieval failed: {exc}",
+        )
 
 
 @app.post("/upload-dataset", response_model=UploadDatasetResponse)
