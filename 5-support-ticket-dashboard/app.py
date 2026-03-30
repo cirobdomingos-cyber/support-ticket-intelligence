@@ -72,7 +72,41 @@ def _normalize_dataset_columns(df: pd.DataFrame) -> pd.DataFrame:
     }
     if rename_map:
         df = df.rename(columns=rename_map)
+
+    # Alias normalization can map multiple source columns to one target name.
+    # Merge duplicates by taking the first non-null value left-to-right.
+    if df.columns.duplicated().any():
+        deduped_frames: list[pd.Series] = []
+        deduped_names: list[str] = []
+        seen: set[str] = set()
+        for column_name in df.columns:
+            if column_name in seen:
+                continue
+            same_named = df.loc[:, df.columns == column_name]
+            if same_named.shape[1] == 1:
+                merged_series = same_named.iloc[:, 0]
+            else:
+                merged_series = same_named.bfill(axis=1).iloc[:, 0]
+            deduped_frames.append(merged_series)
+            deduped_names.append(column_name)
+            seen.add(column_name)
+        df = pd.concat(deduped_frames, axis=1)
+        df.columns = deduped_names
     return df
+
+
+def _synthetic_output_options() -> list[str]:
+    preferred: dict[str, str] = {}
+    for public_name, internal_name in PUBLIC_TO_INTERNAL_COLUMNS.items():
+        if internal_name not in preferred:
+            preferred[internal_name] = public_name
+        # Prefer canonical names that match the internal schema exactly.
+        if public_name == internal_name:
+            preferred[internal_name] = public_name
+        # Prefer creation_date over created_date when both are available.
+        if internal_name == "creation_date" and public_name == "creation_date":
+            preferred[internal_name] = public_name
+    return sorted(set(preferred.values()))
 
 
 def load_dataset() -> pd.DataFrame:
@@ -334,10 +368,11 @@ def show_setup_training() -> None:
 
     with right_col:
         st.markdown("**Generate synthetic dataset**")
+        synthetic_options = _synthetic_output_options()
         synthetic_columns = st.multiselect(
             "Synthetic output columns",
-            options=sorted(PUBLIC_TO_INTERNAL_COLUMNS.keys()),
-            default=sorted(PUBLIC_TO_INTERNAL_COLUMNS.keys()),
+            options=synthetic_options,
+            default=synthetic_options,
             help="Choose which public-safe columns to include in generated dataset.",
         )
         if st.button("Generate Synthetic Dataset", key="generate_dataset"):

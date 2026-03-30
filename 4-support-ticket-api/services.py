@@ -456,18 +456,22 @@ def _generate_dataset_frame(size: int = 50000, days_back: int = 730) -> pd.DataF
 
 def _resolve_output_columns(columns: list[str], internal_to_public: dict[str, str]) -> list[str]:
     output_columns: list[str] = []
+    seen_outputs: set[str] = set()
     for column in columns:
         normalized = str(column).strip()
         if not normalized:
             continue
-        if normalized in output_columns:
-            continue
+        resolved: str | None = None
         if normalized in internal_to_public.values():
-            output_columns.append(normalized)
+            resolved = normalized
         elif normalized in internal_to_public:
-            output_columns.append(internal_to_public[normalized])
+            resolved = internal_to_public[normalized]
         else:
             raise ValueError(f"Unknown column for selection: {normalized}")
+        if resolved in seen_outputs:
+            continue
+        output_columns.append(resolved)
+        seen_outputs.add(resolved)
     if not output_columns:
         raise ValueError("No valid columns selected for output")
     return output_columns
