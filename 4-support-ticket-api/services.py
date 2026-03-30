@@ -16,9 +16,6 @@ import faiss
 import joblib
 import numpy as np
 import pandas as pd
-from langchain.prompts import PromptTemplate
-from langchain_community.llms import HuggingFaceHub
-from langchain_openai import ChatOpenAI
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -792,6 +789,10 @@ def _create_llm_client() -> tuple[Any | None, bool, str | None]:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
             return None, False, "OPENAI_API_KEY is not configured"
+        try:
+            from langchain_openai import ChatOpenAI
+        except Exception:
+            return None, False, "LangChain OpenAI packages are not installed"
         model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         return ChatOpenAI(model=model_name, temperature=0.2), True, None
 
@@ -799,6 +800,10 @@ def _create_llm_client() -> tuple[Any | None, bool, str | None]:
         hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN", "").strip()
         if not hf_token:
             return None, False, "HUGGINGFACEHUB_API_TOKEN is not configured"
+        try:
+            from langchain_community.llms import HuggingFaceHub
+        except Exception:
+            return None, False, "LangChain community packages are not installed"
         repo_id = os.getenv("HUGGINGFACE_REPO_ID", "google/flan-t5-large")
         return (
             HuggingFaceHub(
@@ -832,11 +837,23 @@ def suggest_response(ticket_description: str) -> dict[str, Any]:
         }
 
     prompt_template_text = _load_suggest_prompt_template()
-    prompt_template = PromptTemplate.from_template(prompt_template_text)
-    prompt = prompt_template.format(
-        ticket_description=description,
-        context_tickets=_format_context_tickets(context_tickets),
-    )
+    try:
+        from langchain.prompts import PromptTemplate
+
+        prompt_template = PromptTemplate.from_template(prompt_template_text)
+        prompt = prompt_template.format(
+            ticket_description=description,
+            context_tickets=_format_context_tickets(context_tickets),
+        )
+    except Exception:
+        return {
+            "suggested_response": (
+                "AI response suggestion requires LangChain packages to be installed. "
+                "Configure dependencies and API keys to enable this feature."
+            ),
+            "context_tickets": context_tickets,
+            "llm_available": False,
+        }
 
     llm_output = llm.invoke(prompt)
     if hasattr(llm_output, "content"):
