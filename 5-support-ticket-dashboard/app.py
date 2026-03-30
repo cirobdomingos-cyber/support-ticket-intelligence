@@ -193,12 +193,57 @@ def generate_synthetic_dataset(include_columns: list[str]) -> dict[str, Any]:
 
 
 def train_routing_models() -> dict[str, Any]:
-    response = requests.post(f"{API_URL}/train", timeout=3600)
+    """
+    Train routing models with Railway connection failure recovery.
+    
+    If the /train response fails due to connection issues, verify that training
+    actually succeeded on the API side by calling /verify-models.
+    """
+    try:
+        print("[dashboard] Calling /train endpoint (timeout=3600s)...")
+        response = requests.post(f"{API_URL}/train", timeout=3600)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Unexpected training response payload")
+        print(f"[dashboard] Training succeeded: {payload}")
+        return payload
+    except (requests.exceptions.ChunkedEncodingError, 
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout) as conn_error:
+        # Connection was interrupted, but models might have been trained
+        print(f"[dashboard] Connection error during training: {conn_error}")
+        print("[dashboard] Attempting to verify if models were actually trained...")
+        try:
+            verify_response = requests.post(f"{API_URL}/verify-models", timeout=30)
+            verify_response.raise_for_status()
+            verify_data = verify_response.json()
+            print(f"[dashboard] Model verification result: {verify_data}")
+            
+            if verify_data.get("routing_models_loaded") or verify_data.get("all_models_loaded"):
+                print("[dashboard] Models are loaded! Training succeeded despite connection error.")
+                return {
+                    "success": True,
+                    "status": "Training succeeded (verified after connection recovery)",
+                    "routing_models_loaded": verify_data.get("routing_models_loaded"),
+                    "semantic_search_loaded": verify_data.get("semantic_search_loaded"),
+                }
+            else:
+                print("[dashboard] Models not loaded after verification.")
+                raise conn_error
+        except Exception as verify_error:
+            print(f"[dashboard] Verification also failed: {verify_error}")
+            raise conn_error
+    except requests.exceptions.HTTPError as http_error:
+        print(f"[dashboard] HTTP error during training: {http_error}")
+        raise
+
+
+def verify_models_loaded() -> dict[str, Any]:
+    """Verify that routing models are actually loaded in the API."""
+    response = requests.post(f"{API_URL}/verify-models", timeout=30)
     response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise ValueError("Unexpected training response payload")
-    return payload
+    return response.json()
 
 
 def build_search_index() -> dict[str, Any]:
@@ -400,18 +445,36 @@ def show_setup_training() -> None:
     st.subheader("Train Models")
     if st.button("Train Routing Models", key="train_models"):
         try:
-            with st.spinner("Training routing models..."):
+            with st.spinner("Training routing models (this may take a few minutes)..."):
                 result = train_routing_models()
             if result.get("success"):
                 st.success(result.get("status", "Training completed."))
-                st.caption(
-                    "Artifacts path: "
-                    f"{result.get('artifacts_path', '-')}, "
-                    f"rows: {result.get('row_count', 0)}, "
-                    f"vectors: {result.get('vector_count', 0)}"
-                )
+                if result.get("artifacts_path"):
+                    st.caption(
+                        "Artifacts path: "
+                        f"{result.get('artifacts_path', '-')}, "
+                        f"rows: {result.get('row_count', 0)}, "
+                        f"vectors: {result.get('vector_count', 0)}"
+                    )
+            elif result.get("routing_models_loaded"):
+                st.success("✓ Training completed and models loaded (connection recovered)")
+                st.info("Models verified as loaded after connection recovery")
             else:
                 st.error(result.get("status", "Training failed."))
+        except (requests.exceptions.ChunkedEncodingError, 
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as conn_exc:
+            st.warning(f"⚠ Connection interrupted: {conn_exc}")
+            st.info("Models may have trained successfully. Checking verification status...")
+            try:
+                verify_result = verify_models_loaded()
+                if verify_result.get("routing_models_loaded"):
+                    st.success("✓ Verification successful! Models are loaded.")
+                    st.metric("Routing Models Loaded", "True")
+                else:
+                    st.error("Models not verified as loaded after training attempt.")
+            except Exception as verify_exc:
+                st.error(f"Could not verify models: {verify_exc}")
         except requests.exceptions.HTTPError as exc:
             st.error(f"Training failed: {exc.response.text}")
         except Exception as exc:

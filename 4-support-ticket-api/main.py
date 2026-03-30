@@ -185,25 +185,41 @@ def generate_dataset(request: GenerateDatasetRequest | None = None) -> GenerateD
 
 def _run_training_pipeline() -> TrainResponse:
     try:
+        print("[train] Starting training pipeline...")
         dataset_path = services.get_dataset_path()
         dataset_generated = False
         if not dataset_path.exists():
+            print("[train] No dataset found, generating synthetic dataset...")
             dataset_path, row_count = services.generate_synthetic_dataset()
             dataset_generated = True
+            print(f"[train] Generated dataset with {row_count} rows at {dataset_path}")
         else:
             row_count = int(pd.read_csv(dataset_path).shape[0])
+            print(f"[train] Using existing dataset with {row_count} rows at {dataset_path}")
 
+        print("[train] Training routing models...")
         model_dir = services.train_routing_models(dataset_path=dataset_path)
+        print(f"[train] Models saved to {model_dir}")
 
+        print("[train] Building FAISS index...")
         vector_count = services.build_faiss_index()
+        print(f"[train] FAISS index built with {vector_count} vectors")
 
+        print("[train] Loading routing resources from disk...")
         services.load_routing_resources()
+        print("[train] Routing resources loaded successfully")
+        
+        print("[train] Getting model status...")
         model_state = services.get_model_status()
+        print(f"[train] Model state: {model_state}")
+        
+        print("[train] Updating app.state with loaded models...")
         app.state.routing_models_loaded = model_state["routing_loaded"]
         app.state.semantic_search_loaded = model_state["semantic_loaded"]
         app.state.models_loaded = model_state["all_loaded"]
+        print(f"[train] App state updated: routing_loaded={app.state.routing_models_loaded}")
 
-        return TrainResponse(
+        response = TrainResponse(
             success=True,
             status=(
                 "Training finished and models reloaded. "
@@ -214,16 +230,71 @@ def _run_training_pipeline() -> TrainResponse:
             vector_count=vector_count,
             artifacts_path=str(model_dir.resolve()),
         )
+        print(f"[train] Training complete, returning response: success={response.success}")
+        return response
     except Exception as exc:
+        print(f"[train] ERROR during training: {exc}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Training failed before models could be reloaded: {exc}",
+            detail=f"Training failed: {exc}",
         )
 
 
 @app.post("/train", response_model=TrainResponse)
 def train_models() -> TrainResponse:
     return _run_training_pipeline()
+
+
+@app.post("/verify-models")
+def verify_models() -> dict[str, object]:
+    """Verify that models have actually been loaded into memory (useful for Railway timeout recovery)."""
+    try:
+        model_state = services.get_model_status()
+        routing_loaded = model_state["routing_loaded"]
+        semantic_loaded = model_state["semantic_loaded"]
+        all_loaded = model_state["all_loaded"]
+        
+        print(f"[verify] Current model state: routing={routing_loaded} semantic={semantic_loaded} all={all_loaded}")
+        
+        # If models aren't loaded but files exist, try to load them now
+        if not routing_loaded:
+            print("[verify] Routing models not loaded, attempting to load...")
+            try:
+                services.load_routing_resources()
+                model_state = services.get_model_status()
+                routing_loaded = model_state["routing_loaded"]
+                print(f"[verify] Routing load attempt result: {routing_loaded}")
+            except Exception as e:
+                print(f"[verify] Routing load failed: {e}")
+        
+        if not semantic_loaded:
+            print("[verify] Semantic search not loaded, attempting to load...")
+            try:
+                services.load_semantic_search_resources()
+                model_state = services.get_model_status()
+                semantic_loaded = model_state["semantic_loaded"]
+                print(f"[verify] Semantic load attempt result: {semantic_loaded}")
+            except Exception as e:
+                print(f"[verify] Semantic load failed: {e}")
+        
+        # Update app.state to reflect actual loaded state
+        app.state.routing_models_loaded = routing_loaded
+        app.state.semantic_search_loaded = semantic_loaded
+        app.state.models_loaded = routing_loaded and semantic_loaded
+        
+        return {
+            "routing_models_loaded": routing_loaded,
+            "semantic_search_loaded": semantic_loaded,
+            "all_models_loaded": routing_loaded and semantic_loaded,
+        }
+    except Exception as exc:
+        print(f"[verify] ERROR: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Verification failed: {exc}",
+        )
 
 
 @app.post("/build-index", response_model=BuildIndexResponse)
