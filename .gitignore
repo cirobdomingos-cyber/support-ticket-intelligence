@@ -1,9 +1,25 @@
+# Virtual environments
 .venv/
+venv/
+*/venv/
+
+# VS Code
 .vscode/
+
+# Python cache
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.pyc
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Misc Python
 *.sqlite3
 *.db
 *.log
@@ -12,26 +28,38 @@ __pycache__/
 *.swp
 *.swo
 *.class
+
+# OS files
 .DS_Store
-.ipynb_checkpoints/
-
-# Python package build artifacts
-build/
-dist/
-*.egg-info/
-
-# Model and data artifacts
-**/models/
-**/*.pkl
-**/*.pt
-**/*.bin
-**/*.cache
-**/logs/
-**/results/
-
-# Virtual environments
-venv/
-*/venv/
+Thumbs.db
 
 # Jupyter
+.ipynb_checkpoints/
 *.ipynb_checkpoints
+
+# Trained model artifacts
+**/*.pkl
+**/*.joblib
+**/*.pt
+**/*.bin
+
+# FAISS index files
+**/*.index
+**/*.faiss
+**/search_index.pkl
+
+# Generated dataset CSV files
+sample_dataset.csv
+**/data/sample_dataset.csv
+
+# Model and result directories
+**/models/
+**/results/
+**/logs/
+**/*.cache
+
+# Environment / secrets
+.env
+.env.local
+.env.*
+!.env.example

@@ -1,0 +1,226 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from io import BytesIO
+import json
+import subprocess
+import sys
+
+import pandas as pd
+from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+
+import services
+from models import (
+    BuildIndexResponse,
+    GenerateDatasetRequest,
+    GenerateDatasetResponse,
+    HealthResponse,
+    RouteRequest,
+    RouteResponse,
+    SearchRequest,
+    SearchResult,
+    StatusResponse,
+    UploadDatasetResponse,
+)
+
+
+def _normalize_dataset_columns(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {
+        col: services.PUBLIC_TO_INTERNAL_COLUMNS[col]
+        for col in df.columns
+        if col in services.PUBLIC_TO_INTERNAL_COLUMNS
+    }
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    return df
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.models_loaded = False
+    try:
+        services.load_models()
+        app.state.models_loaded = services.MODELS_LOADED
+    except Exception as exc:
+        # The app will still start, but routes will return 503 until models are fixed.
+        print(f"[startup] model loading failed: {exc}")
+        app.state.models_loaded = False
+    yield
+
+
+app = FastAPI(title="Support Ticket API", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health_check() -> HealthResponse:
+    return HealthResponse(status="ok", models_loaded=bool(app.state.models_loaded))
+
+
+@app.post("/route", response_model=RouteResponse)
+async def route_ticket(request: RouteRequest) -> RouteResponse:
+    if not app.state.models_loaded:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Models are not loaded yet",
+        )
+    try:
+        assigned_team, confidence, all_scores = services.predict_route(request.description)
+        return RouteResponse(
+            assigned_team=assigned_team,
+            confidence=confidence,
+            all_scores=all_scores,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Routing prediction failed: {exc}",
+        )
+
+
+@app.post("/search", response_model=list[SearchResult])
+async def search_tickets(request: SearchRequest) -> list[SearchResult]:
+    if not app.state.models_loaded:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Models are not loaded yet",
+        )
+    try:
+        results = services.search_similar_tickets(request.description, request.top_k)
+        return [SearchResult(**item) for item in results]
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Search failed: {exc}",
+        )
+
+
+@app.get("/status", response_model=StatusResponse)
+def status_check() -> StatusResponse:
+    dataset_status = services.get_dataset_status()
+    models_status = {
+        "loaded": bool(app.state.models_loaded),
+        "available": services.get_routing_model_files(),
+    }
+    faiss_status = services.get_faiss_index_status()
+    return StatusResponse(
+        dataset=dataset_status,
+        models=models_status,
+        faiss_index=faiss_status,
+    )
+
+
+@app.post("/upload-dataset", response_model=UploadDatasetResponse)
+async def upload_dataset(file: UploadFile = File(...)) -> UploadDatasetResponse:
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+
+    try:
+        df = pd.read_csv(BytesIO(content))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid CSV upload: {exc}")
+
+    df = _normalize_dataset_columns(df)
+    required_columns = set(services.REQUIRED_INTERNAL_COLUMNS)
+    missing = required_columns - set(df.columns)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Missing required columns: {sorted(missing)}",
+        )
+
+    try:
+        _, row_count, columns = services.save_dataset_file(content)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Could not save dataset: {exc}")
+
+    return UploadDatasetResponse(success=True, row_count=row_count, columns=columns)
+
+
+@app.post("/generate-dataset", response_model=GenerateDatasetResponse)
+def generate_dataset(request: GenerateDatasetRequest | None = None) -> GenerateDatasetResponse:
+    try:
+        include_columns = None if request is None else request.include_columns
+        _, row_count = services.generate_synthetic_dataset(include_columns=include_columns)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Dataset generation failed: {exc}",
+        )
+    return GenerateDatasetResponse(success=True, row_count=row_count)
+
+
+def _stream_training_process() -> "Iterator[str]":
+    script_path = services.ROOT_DIR / "2-support-ticket-routing-ml" / "src" / "train_baselines.py"
+    process = subprocess.Popen(
+        [sys.executable, str(script_path)],
+        cwd=str(script_path.parent),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    yield json.dumps({"step": "start", "status": "Training started."}) + "\n"
+
+    if process.stdout is None:
+        yield json.dumps({"step": "error", "status": "Failed to capture training output."}) + "\n"
+        return
+
+    for raw_line in process.stdout:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "Logistic Regression:" in line:
+            step = "training_logreg"
+        elif "XGBoost:" in line:
+            step = "training_xgboost"
+        elif "error" in line.lower():
+            step = "error"
+        else:
+            step = "training"
+        yield json.dumps({"step": step, "status": line}) + "\n"
+
+    return_code = process.wait()
+    if return_code != 0:
+        yield json.dumps(
+            {"step": "complete", "status": f"Training failed with exit code {return_code}."}
+        ) + "\n"
+    else:
+        try:
+            services.load_routing_resources()
+            app.state.models_loaded = services.MODELS_LOADED
+            yield json.dumps({"step": "complete", "status": "Training finished and models reloaded."}) + "\n"
+        except Exception as exc:
+            yield json.dumps(
+                {"step": "complete", "status": f"Training finished but reload failed: {exc}."}
+            ) + "\n"
+
+
+@app.post("/train")
+def train_models() -> StreamingResponse:
+    return StreamingResponse(_stream_training_process(), media_type="application/x-ndjson")
+
+
+@app.post("/build-index", response_model=BuildIndexResponse)
+def build_index() -> BuildIndexResponse:
+    try:
+        vector_count = services.build_faiss_index()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Index build failed: {exc}")
+    return BuildIndexResponse(success=True, vector_count=vector_count)

@@ -1,0 +1,10 @@
+version: '3.9'
+services:
+  dashboard:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./:/app:cached
+    ports:
+      - "8501:8501"
+    command: sh -c "pip install --no-cache-dir -r requirements.txt && streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
