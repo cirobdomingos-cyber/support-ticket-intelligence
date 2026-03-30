@@ -38,6 +38,7 @@ class SuggestResponse(BaseModel):
         description="Top similar tickets used as context for generation",
     )
     llm_available: bool = Field(..., description="Whether a configured LLM provider was available")
+    llm_error: str | None = Field(None, description="Error detail when LLM is unavailable or failed")
 
 
 class DatasetStatus(BaseModel):

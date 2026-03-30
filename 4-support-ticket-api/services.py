@@ -789,20 +789,22 @@ def _create_llm_client() -> tuple[Any | None, bool, str | None]:
 
     try:
         from langchain_huggingface import HuggingFaceEndpoint
-    except Exception:
-        return None, False, "LangChain HuggingFace packages are not installed"
+    except (ImportError, ModuleNotFoundError) as exc:
+        return None, False, f"langchain-huggingface package not installed or failed to import: {exc}"
+    except Exception as exc:
+        return None, False, f"Failed to load LangChain HuggingFace: {exc}"
 
     repo_id = os.getenv("HUGGINGFACE_REPO_ID", "mistralai/Mistral-7B-Instruct-v0.2")
-    return (
-        HuggingFaceEndpoint(
+    try:
+        endpoint = HuggingFaceEndpoint(
             repo_id=repo_id,
             huggingfacehub_api_token=hf_token,
             temperature=0.2,
             max_new_tokens=256,
-        ),
-        True,
-        None,
-    )
+        )
+        return endpoint, True, None
+    except Exception as exc:
+        return None, False, f"Failed to initialize HuggingFace endpoint ({repo_id}): {exc}"
 
 
 def suggest_response(ticket_description: str) -> dict[str, Any]:
@@ -821,6 +823,7 @@ def suggest_response(ticket_description: str) -> dict[str, Any]:
             ),
             "context_tickets": context_tickets,
             "llm_available": False,
+            "llm_error": unavailable_reason,
         }
 
     prompt_template_text = _load_suggest_prompt_template()
@@ -829,17 +832,27 @@ def suggest_response(ticket_description: str) -> dict[str, Any]:
         context_tickets=_format_context_tickets(context_tickets),
     )
 
-    llm_output = llm.invoke(prompt)
-    if hasattr(llm_output, "content"):
-        suggested_response = str(llm_output.content).strip()
-    else:
-        suggested_response = str(llm_output).strip()
+    try:
+        llm_output = llm.invoke(prompt)
+        if hasattr(llm_output, "content"):
+            suggested_response = str(llm_output.content).strip()
+        else:
+            suggested_response = str(llm_output).strip()
 
-    if not suggested_response:
-        suggested_response = "No suggestion returned by the language model."
+        if not suggested_response:
+            suggested_response = "No suggestion returned by the language model."
 
-    return {
-        "suggested_response": suggested_response,
-        "context_tickets": context_tickets,
-        "llm_available": True,
-    }
+        return {
+            "suggested_response": suggested_response,
+            "context_tickets": context_tickets,
+            "llm_available": True,
+            "llm_error": None,
+        }
+    except Exception as invoke_exc:
+        error_detail = str(invoke_exc)
+        return {
+            "suggested_response": "LLM call failed — see error detail below.",
+            "context_tickets": context_tickets,
+            "llm_available": False,
+            "llm_error": error_detail,
+        }

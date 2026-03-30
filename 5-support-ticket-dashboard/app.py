@@ -620,14 +620,25 @@ def show_ai_suggestions() -> None:
                 llm_available = bool(payload.get("llm_available", False))
                 suggested_response = str(payload.get("suggested_response", "")).strip()
                 context_tickets = payload.get("context_tickets", [])
+                llm_error = payload.get("llm_error")
 
                 if llm_available:
                     with st.container(border=True):
                         st.markdown("#### Suggested Agent Response")
                         st.write(suggested_response)
                 else:
-                    st.info("Add a free HUGGINGFACEHUB_API_TOKEN from huggingface.co to enable AI suggestions")
-                    if suggested_response:
+                    token_not_configured = llm_error and "not configured" in llm_error.lower()
+                    if token_not_configured:
+                        st.info(
+                            "Add a free HUGGINGFACEHUB_API_TOKEN from huggingface.co "
+                            "to enable AI suggestions"
+                        )
+                    else:
+                        st.warning(
+                            "AI suggestion is unavailable. "
+                            + (f"**Reason:** {llm_error}" if llm_error else "Unknown error.")
+                        )
+                    if suggested_response and not token_not_configured:
                         st.caption(suggested_response)
 
                 if isinstance(context_tickets, list) and context_tickets:
