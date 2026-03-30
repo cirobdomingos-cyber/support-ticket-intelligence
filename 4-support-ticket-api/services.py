@@ -231,6 +231,8 @@ def get_dataset_rows(limit: int = 5000) -> list[dict[str, Any]]:
 
     capped_limit = max(1, min(int(limit), 5000))
     df = pd.read_csv(dataset_path, nrows=capped_limit)
+    if "creation_date" not in df.columns and "created_date" in df.columns:
+        df["creation_date"] = df["created_date"]
     return df.to_dict(orient="records")
 
 
@@ -297,11 +299,14 @@ def _generate_chassis_number() -> str:
     return f"CH{random.randint(100000, 999999)}"
 
 
-def _rand_datetime_within(days_back: int = 365) -> datetime:
+def _rand_datetime_within(days_back: int = 730) -> datetime:
     now = datetime.now(tz=timezone.utc)
-    start = now - timedelta(days=days_back)
-    random_seconds = random.randint(0, int((now - start).total_seconds()))
-    return start + timedelta(seconds=random_seconds)
+    # Bias toward recent activity by sampling age with a power curve.
+    age_fraction = random.random() ** 1.8
+    age_days = int(age_fraction * days_back)
+    date_point = now - timedelta(days=age_days)
+    random_seconds = random.randint(0, 86399)
+    return date_point.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(seconds=random_seconds)
 
 
 def _typo_word(word: str) -> str:
@@ -389,7 +394,7 @@ def _generate_description(product: str, component: str, failure_mode: str) -> st
     return _add_noise(description).strip()
 
 
-def _generate_ticket(days_back: int = 365) -> dict[str, Any]:
+def _generate_ticket(days_back: int = 730) -> dict[str, Any]:
     product = random.choice(list(GENERATOR_PRODUCTS.keys()))
     component = random.choice(GENERATOR_PRODUCTS[product])
     failure_mode = random.choice(GENERATOR_FAILURE_MODES)
@@ -443,7 +448,7 @@ def _generate_ticket(days_back: int = 365) -> dict[str, Any]:
     }
 
 
-def _generate_dataset_frame(size: int = 50000, days_back: int = 365) -> pd.DataFrame:
+def _generate_dataset_frame(size: int = 50000, days_back: int = 730) -> pd.DataFrame:
     tickets = [_generate_ticket(days_back=days_back) for _ in range(size)]
     return pd.DataFrame(tickets)
 
@@ -469,6 +474,9 @@ def _generate_synthetic_dataset_in_process(output_path: Path, size: int, include
     internal_to_public = _get_internal_to_public_columns()
     dataset = _generate_dataset_frame(size=size)
     dataset = dataset.rename(columns=internal_to_public)
+
+    if "created_date" in dataset.columns and "creation_date" not in dataset.columns:
+        dataset["creation_date"] = dataset["created_date"]
 
     if include_columns:
         selected_columns = _resolve_output_columns(include_columns, internal_to_public)
