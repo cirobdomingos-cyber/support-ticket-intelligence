@@ -185,39 +185,25 @@ def generate_dataset(request: GenerateDatasetRequest | None = None) -> GenerateD
 
 def _run_training_pipeline() -> TrainResponse:
     try:
-        print("[train] Starting training pipeline...")
         dataset_path = services.get_dataset_path()
         dataset_generated = False
         if not dataset_path.exists():
-            print("[train] No dataset found, generating synthetic dataset...")
             dataset_path, row_count = services.generate_synthetic_dataset()
             dataset_generated = True
-            print(f"[train] Generated dataset with {row_count} rows at {dataset_path}")
         else:
             row_count = int(pd.read_csv(dataset_path).shape[0])
-            print(f"[train] Using existing dataset with {row_count} rows at {dataset_path}")
 
-        print("[train] Training routing models...")
         model_dir = services.train_routing_models(dataset_path=dataset_path)
-        print(f"[train] Models saved to {model_dir}")
 
-        print("[train] Building FAISS index...")
         vector_count = services.build_faiss_index()
-        print(f"[train] FAISS index built with {vector_count} vectors")
 
-        print("[train] Loading routing resources from disk...")
         services.load_routing_resources()
-        print("[train] Routing resources loaded successfully")
-        
-        print("[train] Getting model status...")
+
         model_state = services.get_model_status()
-        print(f"[train] Model state: {model_state}")
-        
-        print("[train] Updating app.state with loaded models...")
+
         app.state.routing_models_loaded = model_state["routing_loaded"]
         app.state.semantic_search_loaded = model_state["semantic_loaded"]
         app.state.models_loaded = model_state["all_loaded"]
-        print(f"[train] App state updated: routing_loaded={app.state.routing_models_loaded}")
 
         response = TrainResponse(
             success=True,
@@ -230,10 +216,8 @@ def _run_training_pipeline() -> TrainResponse:
             vector_count=vector_count,
             artifacts_path=str(model_dir.resolve()),
         )
-        print(f"[train] Training complete, returning response: success={response.success}")
         return response
     except Exception as exc:
-        print(f"[train] ERROR during training: {exc}")
         import traceback
         traceback.print_exc()
         raise HTTPException(
