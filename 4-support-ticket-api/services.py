@@ -546,6 +546,8 @@ def _create_search_index_from_dataframe(df: pd.DataFrame) -> int:
 
 
 def build_faiss_index() -> int:
+    global SEMANTIC_SEARCH_LOADED, MODELS_LOADED
+
     dataset_path = get_dataset_path()
     if not dataset_path.exists():
         raise FileNotFoundError("Dataset file not found for FAISS index build.")
@@ -554,6 +556,8 @@ def build_faiss_index() -> int:
     API_LOCAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     with open(API_LOCAL_SEARCH_INDEX_PATH, "wb") as fp:
         pickle.dump({"index": SEARCH_INDEX, "data": SEARCH_DATA}, fp)
+    SEMANTIC_SEARCH_LOADED = True
+    MODELS_LOADED = ROUTING_MODELS_LOADED and SEMANTIC_SEARCH_LOADED
     return vector_count
 
 
