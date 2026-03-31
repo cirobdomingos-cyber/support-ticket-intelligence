@@ -42,19 +42,37 @@ async def lifespan(app: FastAPI):
     app.state.routing_models_loaded = False
     app.state.semantic_search_loaded = False
 
+    # Try loading pre-existing models first (fast path).
     try:
         services.load_models()
-        state = services.get_model_status()
-        app.state.models_loaded = state["all_loaded"]
-        app.state.routing_models_loaded = state["routing_loaded"]
-        app.state.semantic_search_loaded = state["semantic_loaded"]
-    except Exception as exc:
-        # The app will still start, but routes will return 503 until models are fixed.
-        print(f"[startup] model loading failed: {exc}")
-        app.state.models_loaded = False
-        state = services.get_model_status()
-        app.state.routing_models_loaded = state["routing_loaded"]
-        app.state.semantic_search_loaded = state["semantic_loaded"]
+        print("[startup] models loaded from existing artifacts")
+    except Exception:
+        # No artifacts found — run the full setup pipeline automatically so the
+        # app is ready to use without any manual training step.
+        print("[startup] no model artifacts found, running auto-setup (generate → train → index)...")
+        try:
+            dataset_path = services.get_dataset_path()
+            if not dataset_path.exists():
+                print("[startup] generating synthetic dataset...")
+                dataset_path, row_count = services.generate_synthetic_dataset()
+                print(f"[startup] dataset ready: {row_count} rows")
+
+            print("[startup] training routing models...")
+            services.train_routing_models(dataset_path=dataset_path)
+
+            print("[startup] building FAISS index...")
+            services.build_faiss_index()
+
+            print("[startup] loading models...")
+            services.load_models()
+            print("[startup] auto-setup complete — app is ready")
+        except Exception as setup_exc:
+            print(f"[startup] auto-setup failed: {setup_exc}")
+
+    state = services.get_model_status()
+    app.state.models_loaded = state["all_loaded"]
+    app.state.routing_models_loaded = state["routing_loaded"]
+    app.state.semantic_search_loaded = state["semantic_loaded"]
     yield
 
 
