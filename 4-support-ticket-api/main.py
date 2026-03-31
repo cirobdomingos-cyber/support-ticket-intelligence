@@ -45,41 +45,9 @@ async def lifespan(app: FastAPI):
     app.state.routing_models_loaded = False
     app.state.semantic_search_loaded = False
 
-    # Try loading pre-existing models first (fast path).
-    try:
-        services.load_models()
-        print("[startup] models loaded from existing artifacts")
-    except Exception:
-        # No artifacts found — run the full setup pipeline automatically so the
-        # app is ready to use without any manual training step.
-        print("[startup] no model artifacts found, running auto-setup (generate → train → index)...")
-        try:
-            dataset_path = services.get_dataset_path()
-            if not dataset_path.exists():
-                print("[startup] generating synthetic dataset...")
-                dataset_path, row_count = services.generate_synthetic_dataset()
-                print(f"[startup] dataset ready: {row_count} rows")
-
-            dataset_status = services.get_dataset_status()
-            if dataset_status.get("routing_capable", False):
-                print("[startup] training routing models...")
-                try:
-                    services.train_routing_models(dataset_path=dataset_path)
-                except Exception as train_exc:
-                    print(f"[startup] routing model training skipped: {train_exc}")
-            else:
-                print("[startup] dataset has no 'assigned_team' column — skipping routing model training")
-
-            print("[startup] building FAISS index...")
-            services.build_faiss_index()
-
-            print("[startup] loading models...")
-            services.load_models()
-            print("[startup] auto-setup complete — app is ready")
-        except Exception as setup_exc:
-            print(f"[startup] auto-setup failed: {setup_exc}")
-
-    state = services.get_model_status()
+    # Keep startup fast on Railway: do not train/build index during lifespan.
+    # Only attempt a best-effort routing artifact load if files already exist.
+    state = services.get_model_status(auto_recover=True)
     app.state.models_loaded = state["all_loaded"]
     app.state.routing_models_loaded = state["routing_loaded"]
     app.state.semantic_search_loaded = state["semantic_loaded"]
@@ -127,10 +95,22 @@ async def route_ticket(request: RouteRequest) -> RouteResponse:
 @app.post("/search", response_model=list[SearchResult])
 async def search_tickets(request: SearchRequest) -> list[SearchResult]:
     if not app.state.semantic_search_loaded:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Semantic search resources are not loaded yet",
-        )
+        try:
+            services.load_semantic_search_resources()
+            model_state = services.get_model_status(auto_recover=True)
+            app.state.routing_models_loaded = model_state["routing_loaded"]
+            app.state.semantic_search_loaded = model_state["semantic_loaded"]
+            app.state.models_loaded = model_state["all_loaded"]
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Semantic search resources are not loaded yet: {exc}",
+            )
+        if not app.state.semantic_search_loaded:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Semantic search resources are not loaded yet",
+            )
     try:
         results = services.search_similar_tickets(request.description, request.top_k)
         return [SearchResult(**item) for item in results]
@@ -145,6 +125,23 @@ async def search_tickets(request: SearchRequest) -> list[SearchResult]:
 
 @app.post("/suggest", response_model=SuggestResponse)
 async def suggest_ticket_response(request: SuggestRequest) -> SuggestResponse:
+    if not app.state.semantic_search_loaded:
+        try:
+            services.load_semantic_search_resources()
+            model_state = services.get_model_status(auto_recover=True)
+            app.state.routing_models_loaded = model_state["routing_loaded"]
+            app.state.semantic_search_loaded = model_state["semantic_loaded"]
+            app.state.models_loaded = model_state["all_loaded"]
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Semantic search resources are not loaded yet: {exc}",
+            )
+        if not app.state.semantic_search_loaded:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Semantic search resources are not loaded yet",
+            )
     try:
         suggestion = services.suggest_response(request.description)
         return SuggestResponse(**suggestion)
