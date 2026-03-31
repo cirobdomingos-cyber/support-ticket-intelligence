@@ -782,29 +782,52 @@ def _format_context_tickets(tickets: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+class _HFInferenceClientWrapper:
+    """Thin wrapper around huggingface_hub.InferenceClient with an invoke() interface."""
+
+    def __init__(self, client: Any, repo_id: str) -> None:
+        self._client = client
+        self._repo_id = repo_id
+
+    def invoke(self, prompt: str) -> str:
+        return self._client.text_generation(
+            prompt,
+            model=self._repo_id,
+            max_new_tokens=256,
+            temperature=0.2,
+        )
+
+
 def _create_llm_client() -> tuple[Any | None, bool, str | None]:
     hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN", "").strip()
     if not hf_token:
         return None, False, "HUGGINGFACEHUB_API_TOKEN is not configured"
 
+    repo_id = os.getenv("HUGGINGFACE_REPO_ID", "mistralai/Mistral-7B-Instruct-v0.2")
+
+    # Try langchain_huggingface first; fall through if not installed.
     try:
         from langchain_huggingface import HuggingFaceEndpoint
-    except (ImportError, ModuleNotFoundError) as exc:
-        return None, False, f"langchain-huggingface package not installed or failed to import: {exc}"
-    except Exception as exc:
-        return None, False, f"Failed to load LangChain HuggingFace: {exc}"
+        try:
+            endpoint = HuggingFaceEndpoint(
+                repo_id=repo_id,
+                huggingfacehub_api_token=hf_token,
+                temperature=0.2,
+                max_new_tokens=256,
+            )
+            return endpoint, True, None
+        except Exception as exc:
+            return None, False, f"Failed to initialize HuggingFace endpoint ({repo_id}): {exc}"
+    except (ImportError, ModuleNotFoundError):
+        pass  # Fall back to huggingface_hub.InferenceClient below.
 
-    repo_id = os.getenv("HUGGINGFACE_REPO_ID", "mistralai/Mistral-7B-Instruct-v0.2")
+    # huggingface_hub is always present (sentence-transformers dependency).
     try:
-        endpoint = HuggingFaceEndpoint(
-            repo_id=repo_id,
-            huggingfacehub_api_token=hf_token,
-            temperature=0.2,
-            max_new_tokens=256,
-        )
-        return endpoint, True, None
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(token=hf_token)
+        return _HFInferenceClientWrapper(client, repo_id), True, None
     except Exception as exc:
-        return None, False, f"Failed to initialize HuggingFace endpoint ({repo_id}): {exc}"
+        return None, False, f"Failed to initialize HuggingFace InferenceClient: {exc}"
 
 
 def suggest_response(ticket_description: str) -> dict[str, Any]:
