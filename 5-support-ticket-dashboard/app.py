@@ -159,6 +159,12 @@ def call_search(description: str, top_k: int) -> list[dict[str, Any]]:
     return response.json()
 
 
+def call_model_performance() -> dict[str, Any]:
+    response = requests.get(f"{API_URL}/model-performance", timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
 def call_suggest(description: str) -> dict[str, Any]:
     response = requests.post(
         f"{API_URL}/suggest",
@@ -653,8 +659,30 @@ def show_ai_suggestions() -> None:
                 st.error(f"Unexpected error: {exc}")
 
 
+_SLA_HOURS: dict[str, int] = {"Critical": 24, "High": 48, "Medium": 72, "Low": 96}
+_DEFAULT_SLA_HOURS = 72
+
+
+def _compute_sla_breach(row: Any, now: pd.Timestamp) -> bool:
+    """Return True if the ticket violated its SLA threshold."""
+    threshold_h = _SLA_HOURS.get(str(row.get("severity", "")), _DEFAULT_SLA_HOURS)
+    threshold_s = threshold_h * 3600
+    ttc = row.get("time_to_close_seconds")
+    if ttc not in (None, "", float("nan")):
+        try:
+            return float(ttc) > threshold_s
+        except (ValueError, TypeError):
+            pass
+    # Open ticket — measure elapsed time from creation
+    created = row.get("_created_dt")
+    if created is not pd.NaT and created is not None:
+        elapsed_s = (now - created).total_seconds()
+        return elapsed_s > threshold_s
+    return False
+
+
 def show_kpi_analytics() -> None:
-    st.header("KPI")
+    st.header("KPI Analytics")
 
     try:
         df = load_dataset()
@@ -672,56 +700,319 @@ def show_kpi_analytics() -> None:
     df = df.copy()
     df["assigned_team"] = df["assigned_team"].fillna("Unknown")
 
-    # Try to detect a date column; if none found, let user pick from all columns.
-    date_column = None
-    for candidate in ["creation_date", "creation_datetime", "close_date", "close_datetime",
-                      "created_date", "created_timestamp", "closed_date", "closed_timestamp"]:
-        if candidate in df.columns:
-            date_column = candidate
+    # Parse creation date
+    for col in ["creation_date", "creation_datetime", "created_date", "created_timestamp"]:
+        if col in df.columns:
+            df["_created_dt"] = pd.to_datetime(df[col], errors="coerce")
             break
-    if date_column is None:
-        datetime_candidates = df.columns.tolist()
-        date_column = st.selectbox(
-            "No recognised date column found. Select the date/time column to use for trend chart:",
-            options=["(none — skip trend chart)"] + datetime_candidates,
-        )
-        if date_column == "(none — skip trend chart)":
-            date_column = None
-
-    teams = ["All"] + sorted(df["assigned_team"].dropna().unique().tolist())
-    selected_team = st.selectbox("Filter by team", teams)
-    filtered = df if selected_team == "All" else df[df["assigned_team"] == selected_team]
-
-    team_counts = filtered["assigned_team"].value_counts().rename_axis("team").reset_index(name="count")
-
-    has_date = date_column is not None
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total tickets", len(filtered))
-
-    if not team_counts.empty:
-        fig_team = px.bar(team_counts, x="team", y="count", title="Tickets per team")
-        col2.plotly_chart(fig_team, use_container_width=True)
     else:
-        col2.info("No tickets available for the selected team.")
+        df["_created_dt"] = pd.NaT
 
-    if has_date:
-        date_series = pd.to_datetime(filtered[date_column], errors="coerce")
-        trend_df = filtered.copy()
-        trend_df["_date"] = date_series
-        trend_df = trend_df.dropna(subset=["_date"])
-        trend_df["week"] = trend_df["_date"].dt.to_period("W").apply(lambda r: r.start_time)
-        weekly = trend_df.groupby("week").size().reset_index(name="count").sort_values("week")
-        if not weekly.empty:
-            fig_time = px.line(weekly, x="week", y="count", title="Tickets over time")
-            col3.plotly_chart(fig_time, use_container_width=True)
-        else:
-            col3.info("No parseable dates in selected column.")
+    now = pd.Timestamp.now()
+
+    # ── Filters ──────────────────────────────────────────────────────────────
+    with st.expander("Filters", expanded=True):
+        fcol1, fcol2, fcol3 = st.columns(3)
+        teams = ["All"] + sorted(df["assigned_team"].dropna().unique().tolist())
+        sel_team = fcol1.selectbox("Team", teams)
+
+        severities = ["All"]
+        if "severity" in df.columns:
+            severities += sorted(df["severity"].dropna().unique().tolist())
+        sel_sev = fcol2.selectbox("Severity", severities)
+
+        valid_dates = df["_created_dt"].dropna()
+        if not valid_dates.empty:
+            min_d = valid_dates.min().date()
+            max_d = valid_dates.max().date()
+            date_range = fcol3.date_input("Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
+            if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+                d_start, d_end = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
+                df = df[(df["_created_dt"] >= d_start) & (df["_created_dt"] <= d_end + pd.Timedelta(days=1))]
+
+    df = df if sel_team == "All" else df[df["assigned_team"] == sel_team]
+    if sel_sev != "All" and "severity" in df.columns:
+        df = df[df["severity"] == sel_sev]
+
+    if df.empty:
+        st.warning("No tickets match the selected filters.")
+        return
+
+    # ── Derived columns ───────────────────────────────────────────────────────
+    df["_is_open"] = ~df.get("status", pd.Series(dtype=str)).isin(["Resolved", "Closed"])
+    df["_is_escalated"] = df.get("status", pd.Series(dtype=str)) == "Escalated"
+    df["_sla_breach"] = df.apply(lambda r: _compute_sla_breach(r, now), axis=1)
+
+    has_ttc = "time_to_close_seconds" in df.columns
+    closed = df[~df["_is_open"]]
+    if has_ttc and not closed.empty:
+        ttc_numeric = pd.to_numeric(closed["time_to_close_seconds"], errors="coerce").dropna()
+        avg_resolution_h = ttc_numeric.mean() / 3600 if not ttc_numeric.empty else None
     else:
-        col3.info("No date column selected — trend chart skipped.")
+        avg_resolution_h = None
+
+    total = len(df)
+    open_count = int(df["_is_open"].sum())
+    escalated_pct = df["_is_escalated"].mean() * 100
+    sla_breach_pct = df["_sla_breach"].mean() * 100
+
+    # ── Section 1: Top KPIs ───────────────────────────────────────────────────
+    st.markdown("### Overview")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Total Tickets", f"{total:,}")
+    m2.metric("Open Tickets", f"{open_count:,}", delta=f"{open_count/total*100:.1f}% of total")
+    m3.metric(
+        "Avg Resolution Time",
+        f"{avg_resolution_h:.1f}h" if avg_resolution_h is not None else "—",
+    )
+    m4.metric("SLA Breach Rate", f"{sla_breach_pct:.1f}%")
+    m5.metric("Escalation Rate", f"{escalated_pct:.1f}%")
 
     st.markdown("---")
-    st.subheader("Dataset preview")
-    st.dataframe(filtered.head(10))
+
+    # ── Section 2: Volume trend + forecast  |  Severity distribution ─────────
+    st.markdown("### Volume & Severity")
+    col_trend, col_sev = st.columns([3, 2])
+
+    with col_trend:
+        if df["_created_dt"].notna().any():
+            trend_df = df.dropna(subset=["_created_dt"]).copy()
+            trend_df["week"] = trend_df["_created_dt"].dt.to_period("W").apply(lambda r: r.start_time)
+            weekly = trend_df.groupby("week").size().reset_index(name="count").sort_values("week")
+
+            # Simple linear forecast for next 4 weeks
+            import numpy as np
+            x = np.arange(len(weekly))
+            if len(x) >= 3:
+                coeffs = np.polyfit(x, weekly["count"].values, 1)
+                forecast_x = np.arange(len(weekly), len(weekly) + 4)
+                forecast_vals = np.polyval(coeffs, forecast_x).clip(0)
+                last_date = weekly["week"].iloc[-1]
+                forecast_dates = [last_date + pd.Timedelta(weeks=i + 1) for i in range(4)]
+                forecast_df = pd.DataFrame({"week": forecast_dates, "count": forecast_vals, "type": "Forecast"})
+                weekly["type"] = "Actual"
+                combined = pd.concat([weekly, forecast_df], ignore_index=True)
+                fig_trend = px.bar(
+                    combined[combined["type"] == "Actual"], x="week", y="count",
+                    title="Weekly ticket volume + 4-week forecast",
+                    labels={"count": "Tickets", "week": ""},
+                    color_discrete_sequence=["#4C78A8"],
+                )
+                fig_trend.add_scatter(
+                    x=forecast_df["week"], y=forecast_df["count"],
+                    mode="lines+markers", name="Forecast",
+                    line=dict(dash="dash", color="#E45756"),
+                )
+            else:
+                fig_trend = px.bar(weekly, x="week", y="count", title="Weekly ticket volume")
+            st.plotly_chart(fig_trend, use_container_width=True)
+        else:
+            st.info("No date data available for trend chart.")
+
+    with col_sev:
+        if "severity" in df.columns:
+            sev_counts = df["severity"].value_counts().reset_index()
+            sev_counts.columns = ["severity", "count"]
+            color_map = {"Critical": "#E45756", "High": "#F58518", "Medium": "#EECA3B", "Low": "#72B7B2"}
+            fig_sev = px.pie(
+                sev_counts, names="severity", values="count",
+                title="Severity distribution", hole=0.45,
+                color="severity", color_discrete_map=color_map,
+            )
+            fig_sev.update_traces(textposition="inside", textinfo="percent+label")
+            st.plotly_chart(fig_sev, use_container_width=True)
+        else:
+            st.info("No severity column in dataset.")
+
+    st.markdown("---")
+
+    # ── Section 3: Team performance bar  |  Status distribution ─────────────
+    st.markdown("### Team Performance")
+    col_team, col_status = st.columns(2)
+
+    with col_team:
+        if has_ttc and not closed.empty:
+            team_res = (
+                closed.assign(ttc_h=pd.to_numeric(closed["time_to_close_seconds"], errors="coerce") / 3600)
+                .groupby("assigned_team")["ttc_h"]
+                .mean()
+                .dropna()
+                .sort_values()
+                .reset_index()
+            )
+            team_res.columns = ["team", "avg_resolution_h"]
+            fig_res = px.bar(
+                team_res, x="avg_resolution_h", y="team", orientation="h",
+                title="Avg resolution time per team (hours)",
+                labels={"avg_resolution_h": "Hours", "team": ""},
+                color="avg_resolution_h",
+                color_continuous_scale="RdYlGn_r",
+            )
+            fig_res.update_coloraxes(showscale=False)
+            st.plotly_chart(fig_res, use_container_width=True)
+        else:
+            team_counts = df["assigned_team"].value_counts().reset_index()
+            team_counts.columns = ["team", "count"]
+            fig_tc = px.bar(team_counts, x="team", y="count", title="Tickets per team")
+            st.plotly_chart(fig_tc, use_container_width=True)
+
+    with col_status:
+        if "status" in df.columns:
+            status_counts = df["status"].value_counts().reset_index()
+            status_counts.columns = ["status", "count"]
+            fig_status = px.bar(
+                status_counts, x="status", y="count",
+                title="Ticket status distribution",
+                labels={"count": "Tickets", "status": ""},
+                color="status",
+            )
+            st.plotly_chart(fig_status, use_container_width=True)
+        else:
+            st.info("No status column in dataset.")
+
+    st.markdown("---")
+
+    # ── Section 4: Team summary table ─────────────────────────────────────────
+    st.markdown("### Team Summary Table")
+    team_stats_rows = []
+    for team, grp in df.groupby("assigned_team"):
+        t_total = len(grp)
+        t_open = int(grp["_is_open"].sum())
+        t_sla = f"{grp['_sla_breach'].mean() * 100:.1f}%"
+        t_esc = f"{grp['_is_escalated'].mean() * 100:.1f}%"
+        if has_ttc:
+            ttc_h = pd.to_numeric(grp.loc[~grp["_is_open"], "time_to_close_seconds"], errors="coerce") / 3600
+            avg_h = f"{ttc_h.mean():.1f}h" if not ttc_h.dropna().empty else "—"
+        else:
+            avg_h = "—"
+        team_stats_rows.append({
+            "Team": team,
+            "Total": t_total,
+            "Open": t_open,
+            "Avg Resolution": avg_h,
+            "SLA Breach": t_sla,
+            "Escalation": t_esc,
+        })
+    if team_stats_rows:
+        st.dataframe(
+            pd.DataFrame(team_stats_rows).sort_values("Total", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("---")
+
+    # ── Section 5: Failure modes  |  Channel breakdown ────────────────────────
+    st.markdown("### Operational Breakdown")
+    col_fail, col_chan = st.columns(2)
+
+    with col_fail:
+        fm_col = next((c for c in ["failure_mode", "component", "sr_area"] if c in df.columns), None)
+        if fm_col:
+            fm_counts = df[fm_col].value_counts().head(10).reset_index()
+            fm_counts.columns = [fm_col, "count"]
+            fig_fm = px.bar(
+                fm_counts, x="count", y=fm_col, orientation="h",
+                title=f"Top 10 — {fm_col.replace('_', ' ').title()}",
+                labels={"count": "Tickets", fm_col: ""},
+            )
+            st.plotly_chart(fig_fm, use_container_width=True)
+
+    with col_chan:
+        if "ticket_channel" in df.columns:
+            ch_counts = df["ticket_channel"].value_counts().reset_index()
+            ch_counts.columns = ["channel", "count"]
+            fig_ch = px.pie(
+                ch_counts, names="channel", values="count",
+                title="Tickets by channel", hole=0.4,
+            )
+            st.plotly_chart(fig_ch, use_container_width=True)
+        elif "region" in df.columns:
+            reg_counts = df["region"].value_counts().reset_index()
+            reg_counts.columns = ["region", "count"]
+            fig_reg = px.bar(reg_counts, x="region", y="count", title="Tickets by region")
+            st.plotly_chart(fig_reg, use_container_width=True)
+
+
+def show_model_explainability() -> None:
+    st.header("Model Performance")
+    st.caption("Routing model accuracy, feature importance, and confusion matrix from the last training run")
+
+    try:
+        data = call_model_performance()
+    except requests.exceptions.HTTPError as exc:
+        if exc.response.status_code == 404:
+            st.warning("No performance data found. Re-train the routing model in Setup & Training to generate it.")
+        else:
+            st.error(f"API error: {exc.response.text}")
+        return
+    except Exception as exc:
+        st.error(f"Could not load model performance: {exc}")
+        return
+
+    accuracy = data.get("accuracy", 0.0)
+    class_names = data.get("class_names", [])
+    cm = data.get("confusion_matrix", [])
+    features = data.get("feature_importance", [])
+
+    # ── Top metrics ───────────────────────────────────────────────────────────
+    st.markdown("### Routing Model Accuracy")
+    acc_col, _ = st.columns([1, 3])
+    acc_col.metric("Hold-out Accuracy", f"{accuracy * 100:.1f}%")
+    st.progress(min(accuracy, 1.0))
+    st.caption("Evaluated on a 20% hold-out split at training time (LogisticRegression + TF-IDF).")
+
+    st.markdown("---")
+
+    # ── Feature importance  |  Confusion matrix ───────────────────────────────
+    st.markdown("### What Drives Routing Decisions")
+    col_feat, col_cm = st.columns(2)
+
+    with col_feat:
+        if features:
+            feat_df = pd.DataFrame(features).head(20)
+            fig_feat = px.bar(
+                feat_df.sort_values("importance"),
+                x="importance", y="word", orientation="h",
+                title="Top 20 keywords by routing influence",
+                labels={"importance": "Importance", "word": ""},
+                color="importance",
+                color_continuous_scale="Blues",
+            )
+            fig_feat.update_coloraxes(showscale=False)
+            fig_feat.update_layout(height=500)
+            st.plotly_chart(fig_feat, use_container_width=True)
+        else:
+            st.info("No feature importance data available.")
+
+    with col_cm:
+        if cm and class_names:
+            import numpy as np
+            cm_arr = np.array(cm)
+            # Normalise rows so colours show recall per class
+            row_sums = cm_arr.sum(axis=1, keepdims=True).clip(1)
+            cm_norm = (cm_arr / row_sums * 100).round(1)
+            fig_cm = px.imshow(
+                cm_norm,
+                x=class_names,
+                y=class_names,
+                text_auto=True,
+                color_continuous_scale="Blues",
+                title="Confusion matrix — row-normalised recall (%)",
+                labels={"x": "Predicted", "y": "Actual", "color": "Recall %"},
+                aspect="auto",
+            )
+            fig_cm.update_layout(height=500)
+            st.plotly_chart(fig_cm, use_container_width=True)
+        else:
+            st.info("No confusion matrix data available.")
+
+    st.markdown("---")
+    st.caption(
+        "This model routes support tickets to the correct engineering team based on free-text descriptions. "
+        "TF-IDF converts text to feature vectors; Logistic Regression classifies them. "
+        "Feature importance is the sum of absolute coefficients across all classes."
+    )
 
 
 def main() -> None:
@@ -750,7 +1041,7 @@ def main() -> None:
 
     available_pages = ["Setup & Training"]
     if modules_ready:
-        available_pages += ["KPI", "Search", "Route", "AI Suggestions"]
+        available_pages += ["KPI", "Model Performance", "Search", "Route", "AI Suggestions"]
 
     page = st.sidebar.radio("Navigation", available_pages)
 
@@ -758,6 +1049,8 @@ def main() -> None:
         show_setup_training()
     elif page == "KPI":
         show_kpi_analytics()
+    elif page == "Model Performance":
+        show_model_explainability()
     elif page == "Search":
         show_similar_cases()
     elif page == "Route":
