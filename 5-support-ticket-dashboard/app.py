@@ -558,7 +558,15 @@ def show_setup_training() -> None:
 
     st.write("- Dataset rows: ", dataset_status.get("row_count", 0))
     st.write("- Routing models loaded: ", models_ready)
+    routing_capable = bool(dataset_status.get("routing_capable", False))
+    st.write("- Routing-capable dataset (assigned_team present): ", routing_capable)
     st.write("- FAISS vectors: ", faiss_status.get("vector_count", 0))
+
+    if dataset_ready and not routing_capable:
+        st.info(
+            "Models stay red because this dataset has no assigned_team column. "
+            "Routing training is skipped for this dataset. Upload or generate data with team labels to enable routing models."
+        )
 
 
 def show_ticket_routing() -> None:

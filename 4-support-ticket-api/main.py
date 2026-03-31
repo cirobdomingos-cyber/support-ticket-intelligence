@@ -243,37 +243,48 @@ def _run_training_pipeline() -> TrainResponse:
             row_count = int(pd.read_csv(dataset_path).shape[0])
 
         dataset_status = services.get_dataset_status()
-        if dataset_status.get("routing_capable", False):
+        routing_expected = bool(dataset_status.get("routing_capable", False))
+        if routing_expected:
             model_dir = services.train_routing_models(dataset_path=dataset_path)
         else:
             model_dir = None
 
         vector_count = services.build_faiss_index()
 
-        if dataset_status.get("routing_capable", False):
+        if routing_expected:
             services.load_routing_resources()
 
         # Re-check status with auto-recovery so successful training never returns a stale false flag.
         model_state = services.get_model_status(auto_recover=True)
 
-        if not model_state["routing_loaded"]:
+        if routing_expected and not model_state["routing_loaded"]:
             raise RuntimeError("Training completed but routing models could not be loaded from artifacts")
 
         app.state.routing_models_loaded = model_state["routing_loaded"]
         app.state.semantic_search_loaded = model_state["semantic_loaded"]
         app.state.models_loaded = model_state["all_loaded"]
 
-        response = TrainResponse(
-            success=True,
-            status=(
+        if routing_expected:
+            status_text = (
                 "Training finished and models reloaded. "
                 f"Routing loaded: {model_state['routing_loaded']}; "
                 f"Semantic loaded: {model_state['semantic_loaded']}."
-            ),
+            )
+            artifacts_path = str(model_dir.resolve()) if model_dir is not None else "n/a"
+        else:
+            status_text = (
+                "Training finished for semantic search only. "
+                "Routing training skipped because dataset has no assigned_team column."
+            )
+            artifacts_path = "n/a (no team column)"
+
+        response = TrainResponse(
+            success=True,
+            status=status_text,
             dataset_generated=dataset_generated,
             row_count=row_count,
             vector_count=vector_count,
-            artifacts_path=str(model_dir.resolve()) if model_dir is not None else "n/a (no team column)",
+            artifacts_path=artifacts_path,
         )
         return response
     except Exception as exc:
