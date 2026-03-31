@@ -787,7 +787,22 @@ def sync_model_load_state() -> bool:
     return MODELS_LOADED
 
 
-def get_model_status() -> dict[str, bool]:
+def ensure_routing_models_loaded() -> bool:
+    """Best-effort reload of routing artifacts from disk if not already loaded."""
+    global ROUTING_MODELS_LOADED
+    if ROUTING_MODELS_LOADED:
+        return True
+    try:
+        load_routing_resources()
+        return ROUTING_MODELS_LOADED
+    except Exception:
+        ROUTING_MODELS_LOADED = False
+        return False
+
+
+def get_model_status(auto_recover: bool = False) -> dict[str, bool]:
+    if auto_recover:
+        ensure_routing_models_loaded()
     sync_model_load_state()
     return {
         "routing_loaded": ROUTING_MODELS_LOADED,

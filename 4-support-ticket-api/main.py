@@ -165,7 +165,7 @@ async def suggest_ticket_response(request: SuggestRequest) -> SuggestResponse:
 @app.get("/status", response_model=StatusResponse)
 def status_check() -> StatusResponse:
     dataset_status = services.get_dataset_status()
-    model_state = services.get_model_status()
+    model_state = services.get_model_status(auto_recover=True)
     models_status = {
         "loaded": bool(model_state["routing_loaded"]),
         "available": services.get_routing_model_files(),
@@ -253,7 +253,11 @@ def _run_training_pipeline() -> TrainResponse:
         if dataset_status.get("routing_capable", False):
             services.load_routing_resources()
 
-        model_state = services.get_model_status()
+        # Re-check status with auto-recovery so successful training never returns a stale false flag.
+        model_state = services.get_model_status(auto_recover=True)
+
+        if not model_state["routing_loaded"]:
+            raise RuntimeError("Training completed but routing models could not be loaded from artifacts")
 
         app.state.routing_models_loaded = model_state["routing_loaded"]
         app.state.semantic_search_loaded = model_state["semantic_loaded"]
@@ -263,7 +267,8 @@ def _run_training_pipeline() -> TrainResponse:
             success=True,
             status=(
                 "Training finished and models reloaded. "
-                f"Routing models loaded: {model_state['routing_loaded']}."
+                f"Routing loaded: {model_state['routing_loaded']}; "
+                f"Semantic loaded: {model_state['semantic_loaded']}."
             ),
             dataset_generated=dataset_generated,
             row_count=row_count,
@@ -289,7 +294,7 @@ def train_models() -> TrainResponse:
 def verify_models() -> dict[str, object]:
     """Verify that models have actually been loaded into memory (useful for Railway timeout recovery)."""
     try:
-        model_state = services.get_model_status()
+        model_state = services.get_model_status(auto_recover=True)
         routing_loaded = model_state["routing_loaded"]
         semantic_loaded = model_state["semantic_loaded"]
         all_loaded = model_state["all_loaded"]
