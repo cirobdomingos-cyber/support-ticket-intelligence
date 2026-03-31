@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import io
 import os
 from io import BytesIO
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import requests
@@ -154,6 +156,16 @@ def call_search(description: str, top_k: int) -> list[dict[str, Any]]:
         f"{API_URL}/search",
         json={"description": description, "top_k": top_k},
         timeout=10,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def call_sql_query(sql: str, limit: int = 500) -> dict[str, Any]:
+    response = requests.post(
+        f"{API_URL}/query",
+        json={"sql": sql, "limit": limit},
+        timeout=30,
     )
     response.raise_for_status()
     return response.json()
@@ -933,6 +945,36 @@ def show_kpi_analytics() -> None:
             fig_reg = px.bar(reg_counts, x="region", y="count", title="Tickets by region")
             st.plotly_chart(fig_reg, use_container_width=True)
 
+    st.markdown("---")
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    st.markdown("### Export")
+    output = io.BytesIO()
+    summary_data = {
+        "Metric": ["Total Tickets", "Open Tickets", "Avg Resolution Time", "SLA Breach Rate", "Escalation Rate"],
+        "Value": [
+            total,
+            open_count,
+            f"{avg_resolution_h:.1f}h" if avg_resolution_h is not None else "—",
+            f"{sla_breach_pct:.1f}%",
+            f"{escalated_pct:.1f}%",
+        ],
+    }
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary", index=False)
+        if team_stats_rows:
+            pd.DataFrame(team_stats_rows).to_excel(writer, sheet_name="Team Stats", index=False)
+        df.drop(columns=[c for c in df.columns if c.startswith("_")], errors="ignore").head(5000).to_excel(
+            writer, sheet_name="Raw Data", index=False
+        )
+    output.seek(0)
+    st.download_button(
+        label="Download KPI Report (Excel)",
+        data=output,
+        file_name="support_ticket_kpi.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 
 def show_model_explainability() -> None:
     st.header("Model Performance")
@@ -1015,6 +1057,168 @@ def show_model_explainability() -> None:
     )
 
 
+def show_data_quality() -> None:
+    st.header("Data Quality")
+    st.caption("Dataset health checks — missing values, duplicates, distributions, and outliers")
+
+    try:
+        df = load_dataset()
+    except FileNotFoundError as exc:
+        st.error(str(exc))
+        return
+    except Exception as exc:
+        st.error(f"Could not load dataset: {exc}")
+        return
+
+    df = df.copy()
+
+    # ── Overview ──────────────────────────────────────────────────────────────
+    st.markdown("### Dataset Overview")
+    ov1, ov2, ov3, ov4 = st.columns(4)
+    ov1.metric("Rows", f"{len(df):,}")
+    ov2.metric("Columns", len(df.columns))
+    dup_count = int(df.duplicated().sum())
+    ov3.metric("Duplicate rows", dup_count, delta=f"{dup_count/len(df)*100:.1f}%")
+    null_pct = df.isnull().mean().mean() * 100
+    ov4.metric("Overall null rate", f"{null_pct:.1f}%")
+
+    st.markdown("---")
+
+    # ── Missing values ────────────────────────────────────────────────────────
+    st.markdown("### Missing Values per Column")
+    null_df = (
+        df.isnull().mean()
+        .mul(100)
+        .reset_index()
+        .rename(columns={"index": "column", 0: "null_pct"})
+        .sort_values("null_pct", ascending=False)
+    )
+    null_df.columns = ["column", "null_pct"]
+    has_nulls = null_df[null_df["null_pct"] > 0]
+    if has_nulls.empty:
+        st.success("No missing values found in any column.")
+    else:
+        fig_null = px.bar(
+            has_nulls.sort_values("null_pct"),
+            x="null_pct", y="column", orientation="h",
+            title="Columns with missing values (%)",
+            labels={"null_pct": "Null %", "column": ""},
+            color="null_pct", color_continuous_scale="Reds",
+        )
+        fig_null.update_coloraxes(showscale=False)
+        st.plotly_chart(fig_null, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── Key column distributions ───────────────────────────────────────────────
+    st.markdown("### Key Column Distributions")
+    cat_cols = [c for c in ["severity", "status", "region", "ticket_channel", "customer_type"] if c in df.columns]
+    if cat_cols:
+        cols = st.columns(min(len(cat_cols), 3))
+        for i, col_name in enumerate(cat_cols):
+            vc = df[col_name].value_counts().reset_index()
+            vc.columns = [col_name, "count"]
+            fig = px.bar(vc, x=col_name, y="count", title=col_name.replace("_", " ").title())
+            cols[i % 3].plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── Resolution time outliers ───────────────────────────────────────────────
+    if "time_to_close_seconds" in df.columns:
+        st.markdown("### Resolution Time Distribution & Outliers")
+        ttc = pd.to_numeric(df["time_to_close_seconds"], errors="coerce").dropna()
+        if not ttc.empty:
+            ttc_h = ttc / 3600
+            q1, q3 = ttc_h.quantile(0.25), ttc_h.quantile(0.75)
+            iqr = q3 - q1
+            outlier_mask = (ttc_h < q1 - 1.5 * iqr) | (ttc_h > q3 + 1.5 * iqr)
+            outlier_count = int(outlier_mask.sum())
+
+            st_col, hist_col = st.columns([1, 3])
+            st_col.metric("Median resolution", f"{ttc_h.median():.1f}h")
+            st_col.metric("95th percentile", f"{ttc_h.quantile(0.95):.1f}h")
+            st_col.metric("Outliers (IQR)", outlier_count, delta=f"{outlier_count/len(ttc_h)*100:.1f}%")
+
+            fig_hist = px.histogram(
+                ttc_h.clip(upper=ttc_h.quantile(0.99)), nbins=60,
+                title="Resolution time distribution (hours, clipped at 99th pct)",
+                labels={"value": "Hours", "count": "Tickets"},
+            )
+            hist_col.plotly_chart(fig_hist, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── Schema table ──────────────────────────────────────────────────────────
+    st.markdown("### Column Schema")
+    schema_rows = []
+    for col in df.columns:
+        series = df[col]
+        schema_rows.append({
+            "Column": col,
+            "Type": str(series.dtype),
+            "Null %": f"{series.isnull().mean() * 100:.1f}%",
+            "Unique values": series.nunique(),
+            "Sample": str(series.dropna().iloc[0]) if not series.dropna().empty else "—",
+        })
+    st.dataframe(pd.DataFrame(schema_rows), use_container_width=True, hide_index=True)
+
+
+def show_sql_explorer() -> None:
+    st.header("SQL Explorer")
+    st.caption("Run SELECT queries directly against the tickets table (SQLite)")
+
+    starter_queries = {
+        "Tickets per team": "SELECT assigned_team, COUNT(*) AS tickets\nFROM tickets\nGROUP BY assigned_team\nORDER BY tickets DESC",
+        "Avg resolution by severity": "SELECT severity, ROUND(AVG(CAST(time_to_close_seconds AS REAL)) / 3600, 1) AS avg_hours\nFROM tickets\nWHERE time_to_close_seconds != ''\nGROUP BY severity\nORDER BY avg_hours DESC",
+        "Escalated tickets by region": "SELECT region, COUNT(*) AS escalated\nFROM tickets\nWHERE status = 'Escalated'\nGROUP BY region\nORDER BY escalated DESC",
+        "Top failure modes": "SELECT failure_mode, COUNT(*) AS count\nFROM tickets\nGROUP BY failure_mode\nORDER BY count DESC\nLIMIT 10",
+        "Open critical tickets": "SELECT ticket_id, description, assigned_team, creation_date\nFROM tickets\nWHERE severity = 'Critical' AND status NOT IN ('Resolved', 'Closed')\nLIMIT 20",
+    }
+
+    selected = st.selectbox("Starter queries", ["(write your own)"] + list(starter_queries.keys()))
+    default_sql = starter_queries.get(selected, "SELECT * FROM tickets LIMIT 10")
+
+    sql = st.text_area("SQL query", value=default_sql, height=140, key="sql_input")
+    limit = st.slider("Max rows", min_value=10, max_value=2000, value=500, step=10)
+
+    if st.button("Run Query", type="primary"):
+        if not sql.strip():
+            st.error("Please enter a query.")
+            return
+        try:
+            with st.spinner("Executing..."):
+                result = call_sql_query(sql.strip(), limit=limit)
+            st.success(f"{result['row_count']} rows returned")
+            if result["columns"] and result["rows"]:
+                result_df = pd.DataFrame(result["rows"], columns=result["columns"])
+                st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+                csv_bytes = result_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download result as CSV",
+                    data=csv_bytes,
+                    file_name="query_result.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.info("Query returned no rows.")
+        except requests.exceptions.HTTPError as exc:
+            st.error(f"Query error: {exc.response.json().get('detail', exc.response.text)}")
+        except Exception as exc:
+            st.error(f"Error: {exc}")
+
+    with st.expander("Available columns in the tickets table"):
+        st.code(
+            "ticket_id, product, component, failure_mode, severity, assigned_team,\n"
+            "status, sub_status, description, creation_date, creation_datetime,\n"
+            "close_date, close_datetime, time_to_close_seconds, first_queued_seconds,\n"
+            "region, customer_type, ticket_channel, creator_country, creator_department,\n"
+            "owner_country, owner_department, dealer_id, dealer_name, mileage,\n"
+            "error_code, sr_type, sr_area",
+            language="text",
+        )
+
+
 def main() -> None:
     st.set_page_config(page_title="Support Ticket Dashboard", layout="wide")
     st.sidebar.title("Support Ticket Dashboard")
@@ -1041,7 +1245,7 @@ def main() -> None:
 
     available_pages = ["Setup & Training"]
     if modules_ready:
-        available_pages += ["KPI", "Model Performance", "Search", "Route", "AI Suggestions"]
+        available_pages += ["KPI", "Data Quality", "SQL Explorer", "Model Performance", "Search", "Route", "AI Suggestions"]
 
     page = st.sidebar.radio("Navigation", available_pages)
 
@@ -1049,6 +1253,10 @@ def main() -> None:
         show_setup_training()
     elif page == "KPI":
         show_kpi_analytics()
+    elif page == "Data Quality":
+        show_data_quality()
+    elif page == "SQL Explorer":
+        show_sql_explorer()
     elif page == "Model Performance":
         show_model_explainability()
     elif page == "Search":

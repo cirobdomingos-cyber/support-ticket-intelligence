@@ -275,12 +275,48 @@ def get_faiss_index_status() -> dict[str, Any]:
     return {"exists": False, "vector_count": 0}
 
 
+def _sqlite_db_path() -> Path:
+    return API_LOCAL_DATASET_PATH.parent / "tickets.db"
+
+
+def _write_dataset_to_sqlite(df: pd.DataFrame) -> None:
+    import sqlite3
+    db_path = _sqlite_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        df.to_sql("tickets", conn, if_exists="replace", index=False)
+    finally:
+        conn.close()
+
+
+def execute_sql_query(sql: str, limit: int = 500) -> dict[str, Any]:
+    import sqlite3
+    db_path = _sqlite_db_path()
+    if not db_path.exists():
+        raise FileNotFoundError("SQL database not found. Generate or upload a dataset first.")
+    clean = sql.strip()
+    if not clean.upper().startswith("SELECT"):
+        raise ValueError("Only SELECT queries are allowed.")
+    if "LIMIT" not in clean.upper():
+        clean = f"{clean} LIMIT {limit}"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cursor = conn.execute(clean)
+        columns = [d[0] for d in cursor.description]
+        rows = [list(r) for r in cursor.fetchall()]
+        return {"columns": columns, "rows": rows, "row_count": len(rows)}
+    finally:
+        conn.close()
+
+
 def save_dataset_file(file_bytes: bytes) -> tuple[Path, int, list[str]]:
     dataset_path = get_dataset_path()
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.read_csv(BytesIO(file_bytes))
     df = _normalize_dataset_columns(df)
     df.to_csv(dataset_path, index=False)
+    _write_dataset_to_sqlite(df)
     return dataset_path, int(df.shape[0]), list(df.columns)
 
 
@@ -524,12 +560,15 @@ def generate_synthetic_dataset(size: int = 50000, include_columns: list[str] | N
                     f"Dataset generator failed: {process.returncode}\nstdout:{process.stdout}\nstderr:{process.stderr}"
                 )
             df = pd.read_csv(output_path)
+            _write_dataset_to_sqlite(df)
             return output_path, int(df.shape[0])
         except FileNotFoundError:
             # API-only deployments may not include the external dataset generator path.
             pass
 
     row_count = _generate_synthetic_dataset_in_process(output_path, size=size, include_columns=include_columns)
+    df = pd.read_csv(output_path)
+    _write_dataset_to_sqlite(df)
     return output_path, row_count
 
 
