@@ -18,6 +18,8 @@ from models import (
     RouteResponse,
     SearchRequest,
     SearchResult,
+    SqlQueryRequest,
+    SqlQueryResponse,
     SuggestRequest,
     SuggestResponse,
     StatusResponse,
@@ -318,6 +320,22 @@ def verify_models() -> dict[str, object]:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Verification failed: {exc}",
+        )
+
+
+@app.post("/query", response_model=SqlQueryResponse)
+def sql_query(request: SqlQueryRequest) -> SqlQueryResponse:
+    try:
+        result = services.execute_sql_query(request.sql, limit=request.limit)
+        return SqlQueryResponse(**result)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Query failed: {exc}",
         )
 
 

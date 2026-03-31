@@ -95,6 +95,17 @@ class TrainResponse(BaseModel):
     artifacts_path: str = Field(..., description="Path where routing model artifacts were written")
 
 
+class SqlQueryRequest(BaseModel):
+    sql: str = Field(..., description="SELECT query to execute against the tickets table")
+    limit: int = Field(500, ge=1, le=5000, description="Max rows to return if LIMIT not in query")
+
+
+class SqlQueryResponse(BaseModel):
+    columns: list[str] = Field(..., description="Column names in result")
+    rows: list[list] = Field(..., description="Result rows")
+    row_count: int = Field(..., description="Number of rows returned")
+
+
 class FeatureImportanceItem(BaseModel):
     word: str
     importance: float
