@@ -95,6 +95,18 @@ class TrainResponse(BaseModel):
     artifacts_path: str = Field(..., description="Path where routing model artifacts were written")
 
 
+class FeatureImportanceItem(BaseModel):
+    word: str
+    importance: float
+
+
+class ModelPerformanceResponse(BaseModel):
+    accuracy: float = Field(..., description="Hold-out accuracy of the routing model")
+    class_names: list[str] = Field(..., description="Team class names")
+    confusion_matrix: list[list[int]] = Field(..., description="Confusion matrix (rows=actual, cols=predicted)")
+    feature_importance: list[FeatureImportanceItem] = Field(..., description="Top 30 TF-IDF features by importance")
+
+
 class HealthResponse(BaseModel):
     status: str = Field(..., description="Health status")
     models_loaded: bool = Field(..., description="Whether models were successfully loaded")

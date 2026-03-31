@@ -19,6 +19,8 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
 
@@ -594,6 +596,27 @@ def train_routing_models(dataset_path: Path | None = None) -> Path:
     vectorizer = TfidfVectorizer(max_features=5000)
     x_features = vectorizer.fit_transform(text_values)
 
+    # Hold out 20% for evaluation metrics saved alongside the model.
+    x_train, x_test, y_train, y_test = train_test_split(
+        x_features, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
+    )
+    eval_model = LogisticRegression(max_iter=1000)
+    eval_model.fit(x_train, y_train)
+    y_pred = eval_model.predict(x_test)
+
+    class_names = [str(c) for c in label_encoder.classes_]
+    cm = confusion_matrix(y_test, y_pred, labels=list(range(len(class_names)))).tolist()
+    acc = float(accuracy_score(y_test, y_pred))
+
+    feature_names = vectorizer.get_feature_names_out()
+    importance = np.abs(eval_model.coef_).sum(axis=0)
+    top_idx = np.argsort(importance)[-30:][::-1]
+    top_features = [
+        {"word": str(feature_names[i]), "importance": float(importance[i])}
+        for i in top_idx
+    ]
+
+    # Train production model on full dataset.
     model = LogisticRegression(max_iter=1000)
     model.fit(x_features, y_encoded)
 
@@ -601,7 +624,27 @@ def train_routing_models(dataset_path: Path | None = None) -> Path:
     joblib.dump(vectorizer, API_LOCAL_MODEL_DIR / "vectorizer.pkl")
     joblib.dump(model, API_LOCAL_MODEL_DIR / "lr_model.pkl")
     joblib.dump(label_encoder, API_LOCAL_MODEL_DIR / "label_encoder.pkl")
+
+    import json as _json
+    perf = {
+        "accuracy": acc,
+        "class_names": class_names,
+        "confusion_matrix": cm,
+        "feature_importance": top_features,
+    }
+    (API_LOCAL_MODEL_DIR / "model_performance.json").write_text(
+        _json.dumps(perf, indent=2), encoding="utf-8"
+    )
+
     return API_LOCAL_MODEL_DIR
+
+
+def get_model_performance() -> dict[str, Any]:
+    perf_path = API_LOCAL_MODEL_DIR / "model_performance.json"
+    if not perf_path.exists():
+        raise FileNotFoundError("Model performance data not found. Train the routing models first.")
+    import json as _json
+    return _json.loads(perf_path.read_text(encoding="utf-8"))
 
 
 def _resolve_routing_model_dir() -> Path:

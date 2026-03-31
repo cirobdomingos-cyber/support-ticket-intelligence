@@ -13,6 +13,7 @@ from models import (
     GenerateDatasetRequest,
     GenerateDatasetResponse,
     HealthResponse,
+    ModelPerformanceResponse,
     RouteRequest,
     RouteResponse,
     SearchRequest,
@@ -317,6 +318,20 @@ def verify_models() -> dict[str, object]:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Verification failed: {exc}",
+        )
+
+
+@app.get("/model-performance", response_model=ModelPerformanceResponse)
+def model_performance() -> ModelPerformanceResponse:
+    try:
+        data = services.get_model_performance()
+        return ModelPerformanceResponse(**data)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not load model performance data: {exc}",
         )
 
 
