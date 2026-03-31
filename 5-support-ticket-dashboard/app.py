@@ -1163,6 +1163,85 @@ def show_data_quality() -> None:
     st.dataframe(pd.DataFrame(schema_rows), use_container_width=True, hide_index=True)
 
 
+def show_overview() -> None:
+    st.markdown(
+        """
+        <h1 style='font-size:2.2rem; margin-bottom:0.2rem;'>Support Ticket Intelligence</h1>
+        <p style='font-size:1.1rem; color:#888; margin-top:0;'>
+        End-to-end AI prototype for support ticket automation — routing, search, analytics, and AI-assisted responses.
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+
+    # ── Capability cards ──────────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    cards = [
+        (c1, "📊", "KPI Analytics", "SLA breach rate, resolution time, team performance, and 4-week volume forecast."),
+        (c2, "🔀", "Ticket Routing", "ML model routes tickets to the right team instantly. >99% accuracy on synthetic data."),
+        (c3, "🔍", "Semantic Search", "FAISS + SentenceTransformers — find the most similar historical cases in milliseconds."),
+        (c4, "🤖", "AI Suggestions", "HuggingFace Mistral-7B drafts a structured agent response grounded in past resolutions."),
+    ]
+    for col, icon, title, desc in cards:
+        with col:
+            st.markdown(
+                f"""
+                <div style='padding:1.2rem;border:1px solid #e0e0e0;border-radius:10px;height:160px;'>
+                <div style='font-size:1.8rem'>{icon}</div>
+                <div style='font-weight:700;margin:0.4rem 0 0.3rem;'>{title}</div>
+                <div style='font-size:0.85rem;color:#555;'>{desc}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("---")
+
+    # ── Live stats ────────────────────────────────────────────────────────────
+    st.markdown("### What's running right now")
+    try:
+        status_data = call_status()
+        dataset_rows = status_data.get("dataset", {}).get("row_count", 0)
+        models_loaded = status_data.get("models", {}).get("loaded", False)
+        faiss_vectors = status_data.get("faiss_index", {}).get("vector_count", 0)
+
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Tickets in dataset", f"{dataset_rows:,}")
+        s2.metric("Routing model", "Ready" if models_loaded else "Not loaded")
+        s3.metric("Search index vectors", f"{faiss_vectors:,}")
+    except Exception:
+        st.info("Could not reach the API to show live stats.")
+
+    st.markdown("---")
+
+    # ── How it works ─────────────────────────────────────────────────────────
+    st.markdown("### How it works")
+    st.markdown(
+        """
+        ```
+        Synthetic dataset (50 k tickets)
+               │
+               ├─► TF-IDF + Logistic Regression  ──► /route   (team assignment)
+               │
+               └─► SentenceTransformers + FAISS   ──► /search  (similar cases)
+                                                   ──► /suggest (AI response draft)
+        ```
+        All powered by a **FastAPI** backend and visualised in this **Streamlit** dashboard.
+        """
+    )
+
+    st.markdown("---")
+
+    # ── Links ─────────────────────────────────────────────────────────────────
+    st.markdown("### Links")
+    lc1, lc2, lc3 = st.columns(3)
+    lc1.markdown("**GitHub**  \n[cirobdomingos-cyber/support-ticket-intelligence](https://github.com/cirobdomingos-cyber/support-ticket-intelligence)")
+    lc2.markdown("**API docs (Swagger)**  \n[/docs](https://support-ticket-intelligence-production-795d.up.railway.app/docs)")
+    lc3.markdown("**Built by**  \n[Ciro Beduschi Domingos](https://www.linkedin.com/in/ciro-beduschi-domingos-209b5138/)")
+
+
 def show_sql_explorer() -> None:
     st.header("SQL Explorer")
     st.caption("Run SELECT queries directly against the tickets table (SQLite)")
@@ -1243,13 +1322,15 @@ def main() -> None:
         and status_payload.get("faiss_index", {}).get("exists", False)
     )
 
-    available_pages = ["Setup & Training"]
+    available_pages = ["Overview", "Setup & Training"]
     if modules_ready:
         available_pages += ["KPI", "Data Quality", "SQL Explorer", "Model Performance", "Search", "Route", "AI Suggestions"]
 
     page = st.sidebar.radio("Navigation", available_pages)
 
-    if page == "Setup & Training":
+    if page == "Overview":
+        show_overview()
+    elif page == "Setup & Training":
         show_setup_training()
     elif page == "KPI":
         show_kpi_analytics()
