@@ -377,10 +377,11 @@ def show_setup_training() -> None:
                 options=available_columns,
                 index=_default_index(available_columns, ["description", "issue_description"]),
             )
+            team_col_options = ["(no team column — routing will be disabled)"] + available_columns
             assigned_team_column = st.selectbox(
-                "Which column is the training target (assigned team)?",
-                options=available_columns,
-                index=_default_index(available_columns, ["assigned_team", "route_team"]),
+                "Which column is the assigned team? (optional — needed for routing model)",
+                options=team_col_options,
+                index=_default_index(team_col_options, ["assigned_team", "route_team"]),
             )
             ticket_id_options = ["(auto-generate ticket_id)"] + available_columns
             ticket_id_column = st.selectbox(
@@ -395,7 +396,9 @@ def show_setup_training() -> None:
                 default=available_columns,
             )
 
-            required_selected = [description_column, assigned_team_column]
+            required_selected = [description_column]
+            if assigned_team_column and assigned_team_column != "(no team column — routing will be disabled)":
+                required_selected.append(assigned_team_column)
             if ticket_id_column and ticket_id_column != "(auto-generate ticket_id)":
                 required_selected.append(ticket_id_column)
             missing_selected = [col for col in required_selected if col not in set(selected_columns)]
@@ -409,16 +412,17 @@ def show_setup_training() -> None:
                 st.error("Could not read the uploaded CSV file.")
             elif selected_columns is None or len(selected_columns) == 0:
                 st.error("Please select at least one column to include.")
-            elif description_column is None or assigned_team_column is None:
-                st.error("Please map description and assigned team columns.")
+            elif description_column is None:
+                st.error("Please map the description column.")
             else:
                 try:
                     subset_df = df_from_file[selected_columns].copy()
 
                     rename_map: dict[str, str] = {
                         description_column: "description",
-                        assigned_team_column: "assigned_team",
                     }
+                    if assigned_team_column and assigned_team_column != "(no team column — routing will be disabled)":
+                        rename_map[assigned_team_column] = "assigned_team"
                     if ticket_id_column and ticket_id_column != "(auto-generate ticket_id)":
                         rename_map[ticket_id_column] = "ticket_id"
 
@@ -437,7 +441,13 @@ def show_setup_training() -> None:
 
                     subset_bytes = subset_df.to_csv(index=False).encode("utf-8")
                     result = upload_dataset_file(subset_bytes, uploaded_file.name)
+                    has_team = "assigned_team" in subset_df.columns
                     st.success(f"Upload succeeded: {result['row_count']} rows validated.")
+                    if not has_team:
+                        st.info(
+                            "No team column was mapped — ticket routing and model training will be disabled. "
+                            "Search, KPI, Data Quality, SQL Explorer, and AI Suggestions remain available."
+                        )
                     preview_df = subset_df
                 except requests.exceptions.HTTPError as exc:
                     st.error(f"Upload failed: {exc.response.text}")
@@ -705,12 +715,10 @@ def show_kpi_analytics() -> None:
         st.error(f"Could not load dataset: {exc}")
         return
 
-    if "assigned_team" not in df.columns:
-        st.error("Dataset is missing the assigned_team column.")
-        return
-
     df = df.copy()
-    df["assigned_team"] = df["assigned_team"].fillna("Unknown")
+    has_team_col = "assigned_team" in df.columns
+    if has_team_col:
+        df["assigned_team"] = df["assigned_team"].fillna("Unknown")
 
     # Parse creation date
     for col in ["creation_date", "creation_datetime", "created_date", "created_timestamp"]:
@@ -724,25 +732,31 @@ def show_kpi_analytics() -> None:
 
     # ── Filters ──────────────────────────────────────────────────────────────
     with st.expander("Filters", expanded=True):
-        fcol1, fcol2, fcol3 = st.columns(3)
-        teams = ["All"] + sorted(df["assigned_team"].dropna().unique().tolist())
-        sel_team = fcol1.selectbox("Team", teams)
+        num_filter_cols = 3 if has_team_col else 2
+        filter_cols = st.columns(num_filter_cols)
+        sel_team = "All"
+        if has_team_col:
+            teams = ["All"] + sorted(df["assigned_team"].dropna().unique().tolist())
+            sel_team = filter_cols[0].selectbox("Team", teams)
 
+        sev_col_idx = 1 if has_team_col else 0
+        date_col_idx = 2 if has_team_col else 1
         severities = ["All"]
         if "severity" in df.columns:
             severities += sorted(df["severity"].dropna().unique().tolist())
-        sel_sev = fcol2.selectbox("Severity", severities)
+        sel_sev = filter_cols[sev_col_idx].selectbox("Severity", severities)
 
         valid_dates = df["_created_dt"].dropna()
         if not valid_dates.empty:
             min_d = valid_dates.min().date()
             max_d = valid_dates.max().date()
-            date_range = fcol3.date_input("Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
+            date_range = filter_cols[date_col_idx].date_input("Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
             if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
                 d_start, d_end = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
                 df = df[(df["_created_dt"] >= d_start) & (df["_created_dt"] <= d_end + pd.Timedelta(days=1))]
 
-    df = df if sel_team == "All" else df[df["assigned_team"] == sel_team]
+    if has_team_col and sel_team != "All":
+        df = df[df["assigned_team"] == sel_team]
     if sel_sev != "All" and "severity" in df.columns:
         df = df[df["severity"] == sel_sev]
 
@@ -843,7 +857,9 @@ def show_kpi_analytics() -> None:
     col_team, col_status = st.columns(2)
 
     with col_team:
-        if has_ttc and not closed.empty:
+        if not has_team_col:
+            st.info("Team performance charts require an 'assigned_team' column.")
+        elif has_ttc and not closed.empty:
             team_res = (
                 closed.assign(ttc_h=pd.to_numeric(closed["time_to_close_seconds"], errors="coerce") / 3600)
                 .groupby("assigned_team")["ttc_h"]
@@ -887,7 +903,9 @@ def show_kpi_analytics() -> None:
     # ── Section 4: Team summary table ─────────────────────────────────────────
     st.markdown("### Team Summary Table")
     team_stats_rows = []
-    for team, grp in df.groupby("assigned_team"):
+    if not has_team_col:
+        st.info("Team summary table requires an 'assigned_team' column.")
+    for team, grp in (df.groupby("assigned_team") if has_team_col else []):
         t_total = len(grp)
         t_open = int(grp["_is_open"].sum())
         t_sla = f"{grp['_sla_breach'].mean() * 100:.1f}%"
@@ -1323,10 +1341,17 @@ def main() -> None:
         and status_payload.get("models", {}).get("loaded", False)
         and status_payload.get("faiss_index", {}).get("exists", False)
     )
+    routing_capable = status_payload.get("dataset", {}).get("routing_capable", False)
 
     available_pages = ["Overview", "Setup & Training"]
     if modules_ready:
-        available_pages += ["KPI", "Data Quality", "SQL Explorer", "Model Performance", "Search", "Route", "AI Suggestions"]
+        available_pages += ["KPI", "Data Quality", "SQL Explorer"]
+        if routing_capable:
+            available_pages += ["Model Performance"]
+        available_pages += ["Search"]
+        if routing_capable:
+            available_pages += ["Route"]
+        available_pages += ["AI Suggestions"]
 
     page = st.sidebar.radio("Navigation", available_pages)
 

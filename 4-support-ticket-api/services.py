@@ -152,7 +152,7 @@ DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS: dict[str, str] = {
     "chassis_series": "chassis_serie",
 }
 
-DEFAULT_REQUIRED_INTERNAL_COLUMNS: list[str] = ["ticket_id", "description", "assigned_team"]
+DEFAULT_REQUIRED_INTERNAL_COLUMNS: list[str] = ["ticket_id", "description"]
 SUGGEST_PROMPT_PATH = BASE_DIR / "prompts" / "suggest_response.txt"
 
 
@@ -217,15 +217,19 @@ def get_dataset_status() -> dict[str, Any]:
     dataset_path = get_dataset_path()
     exists = dataset_path.exists()
     row_count = 0
+    routing_capable = False
     if exists:
         try:
-            row_count = int(pd.read_csv(dataset_path).shape[0])
+            df = pd.read_csv(dataset_path)
+            row_count = int(df.shape[0])
+            routing_capable = "assigned_team" in df.columns
         except Exception:
             row_count = 0
     return {
         "exists": exists,
         "row_count": row_count,
         "path": str(dataset_path),
+        "routing_capable": routing_capable,
     }
 
 
@@ -622,7 +626,11 @@ def train_routing_models(dataset_path: Path | None = None) -> Path:
     required = {"description", "assigned_team"}
     missing = sorted(required - set(df.columns))
     if missing:
-        raise ValueError(f"Dataset is missing required routing columns: {missing}")
+        raise ValueError(
+            f"Dataset is missing required routing columns: {missing}. "
+            "Routing model training is only possible when an 'assigned_team' column is present. "
+            "Upload a dataset that includes team assignments, or use the synthetic dataset generator."
+        )
 
     text_values = df["description"].fillna("").astype(str)
     label_values = df["assigned_team"].fillna("Unassigned").astype(str)

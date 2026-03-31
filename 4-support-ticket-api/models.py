@@ -45,6 +45,7 @@ class DatasetStatus(BaseModel):
     exists: bool = Field(..., description="Whether the dataset file exists")
     row_count: int = Field(..., ge=0, description="Number of rows in the dataset")
     path: str = Field(..., description="Resolved dataset path")
+    routing_capable: bool = Field(False, description="Whether the dataset has an assigned_team column enabling routing")
 
 
 class ModelsStatus(BaseModel):

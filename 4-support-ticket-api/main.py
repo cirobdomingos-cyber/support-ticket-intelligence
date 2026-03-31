@@ -60,8 +60,15 @@ async def lifespan(app: FastAPI):
                 dataset_path, row_count = services.generate_synthetic_dataset()
                 print(f"[startup] dataset ready: {row_count} rows")
 
-            print("[startup] training routing models...")
-            services.train_routing_models(dataset_path=dataset_path)
+            dataset_status = services.get_dataset_status()
+            if dataset_status.get("routing_capable", False):
+                print("[startup] training routing models...")
+                try:
+                    services.train_routing_models(dataset_path=dataset_path)
+                except Exception as train_exc:
+                    print(f"[startup] routing model training skipped: {train_exc}")
+            else:
+                print("[startup] dataset has no 'assigned_team' column — skipping routing model training")
 
             print("[startup] building FAISS index...")
             services.build_faiss_index()
@@ -235,11 +242,16 @@ def _run_training_pipeline() -> TrainResponse:
         else:
             row_count = int(pd.read_csv(dataset_path).shape[0])
 
-        model_dir = services.train_routing_models(dataset_path=dataset_path)
+        dataset_status = services.get_dataset_status()
+        if dataset_status.get("routing_capable", False):
+            model_dir = services.train_routing_models(dataset_path=dataset_path)
+        else:
+            model_dir = None
 
         vector_count = services.build_faiss_index()
 
-        services.load_routing_resources()
+        if dataset_status.get("routing_capable", False):
+            services.load_routing_resources()
 
         model_state = services.get_model_status()
 
@@ -256,7 +268,7 @@ def _run_training_pipeline() -> TrainResponse:
             dataset_generated=dataset_generated,
             row_count=row_count,
             vector_count=vector_count,
-            artifacts_path=str(model_dir.resolve()),
+            artifacts_path=str(model_dir.resolve()) if model_dir is not None else "n/a (no team column)",
         )
         return response
     except Exception as exc:
