@@ -1303,9 +1303,12 @@ def main() -> None:
     st.sidebar.title("Support Ticket Dashboard")
     st.sidebar.caption("Powered by the Support Ticket API")
 
-    connected, models_loaded = check_health()
+    status_payload = safe_call_status()
+    connected = bool(status_payload)
+    models_loaded = status_payload.get("models", {}).get("loaded", False)
+
     if connected:
-        status_text = "Connected" if models_loaded else "Connected, model load pending"
+        status_text = "Connected" if models_loaded else "Connected, models loading"
         status_color = "✅"
     else:
         status_text = "Disconnected"
@@ -1315,7 +1318,6 @@ def main() -> None:
     st.sidebar.write(f"{status_color} {status_text}")
     st.sidebar.write(f"API URL: `{API_URL}`")
 
-    status_payload = safe_call_status()
     modules_ready = (
         status_payload.get("dataset", {}).get("exists", False)
         and status_payload.get("models", {}).get("loaded", False)

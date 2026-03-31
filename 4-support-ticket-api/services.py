@@ -872,12 +872,13 @@ class _HFInferenceClientWrapper:
         self._repo_id = repo_id
 
     def invoke(self, prompt: str) -> str:
-        return self._client.text_generation(
-            prompt,
+        response = self._client.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
             model=self._repo_id,
-            max_new_tokens=256,
+            max_tokens=256,
             temperature=0.2,
         )
+        return response.choices[0].message.content
 
 
 def _create_llm_client() -> tuple[Any | None, bool, str | None]:
