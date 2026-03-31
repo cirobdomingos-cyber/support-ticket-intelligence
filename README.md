@@ -1,9 +1,11 @@
 # Support Ticket Intelligence
 
+[![CI](https://github.com/cirobdomingos-cyber/support-ticket-intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/cirobdomingos-cyber/support-ticket-intelligence/actions/workflows/ci.yml)
+
 > End-to-end AI prototype that automates support ticket routing, surfaces similar past cases,
 > and drafts agent responses — deployed live on Railway.
 
-**Live demo:** [lavish-connection-production-5385.up.railway.app](https://lavish-connection-production-5385.up.railway.app)
+**Live demo:** [lavish-connection-production-5385.up.railway.app](https://lavish-connection-production-5385.up.railway.app) &nbsp;|&nbsp; **API docs:** [support-ticket-intelligence-production-795d.up.railway.app/docs](https://support-ticket-intelligence-production-795d.up.railway.app/docs)
 
 ---
 
