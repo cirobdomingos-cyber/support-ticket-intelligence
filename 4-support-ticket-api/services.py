@@ -1278,13 +1278,36 @@ class _HFInferenceClientWrapper:
 
     def invoke(self, prompt: str) -> str:
         content = prompt.replace("[INST]", "").replace("[/INST]", "").strip()
-        response = self._client.chat_completion(
-            messages=[{"role": "user", "content": content}],
-            model=self._repo_id,
-            max_tokens=256,
-            temperature=0.2,
-        )
-        return response.choices[0].message.content
+        chat_error: str | None = None
+
+        # Prefer chat-completions when the model supports it.
+        try:
+            response = self._client.chat_completion(
+                messages=[{"role": "user", "content": content}],
+                model=self._repo_id,
+                max_tokens=256,
+                temperature=0.2,
+            )
+            return str(response.choices[0].message.content).strip()
+        except Exception as exc:
+            chat_error = str(exc)
+
+        # Fall back to text generation for instruct models that are not exposed as chat models.
+        try:
+            generated = self._client.text_generation(
+                prompt=content,
+                model=self._repo_id,
+                max_new_tokens=256,
+                temperature=0.2,
+                return_full_text=False,
+            )
+            return str(generated).strip()
+        except Exception as exc:
+            generation_error = str(exc)
+            raise RuntimeError(
+                "HuggingFace inference failed for both chat and text-generation paths. "
+                f"chat_error={chat_error}; generation_error={generation_error}"
+            ) from exc
 
 
 def _create_llm_client() -> tuple[Any | None, bool, str | None]:

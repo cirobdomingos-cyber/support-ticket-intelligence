@@ -141,7 +141,7 @@ Set these in Railway service Variables to enable AI suggestions.
 
 ```env
 HUGGINGFACEHUB_API_TOKEN=your_huggingface_token
-HUGGINGFACE_REPO_ID=mistralai/Mistral-7B-Instruct-v0.2
+HUGGINGFACE_REPO_ID=mistralai/Mistral-7B-Instruct-v0.3
 ```
 
 You can create a free token at huggingface.co/settings/tokens.
