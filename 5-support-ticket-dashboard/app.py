@@ -358,6 +358,15 @@ def verify_models_loaded() -> dict[str, Any]:
     return response.json()
 
 
+def clear_all() -> dict[str, Any]:
+    response = requests.post(f"{API_URL}/clear-all", timeout=60)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Unexpected clear-all payload")
+    return payload
+
+
 def build_search_index() -> dict[str, Any]:
     response = requests.post(f"{API_URL}/build-index", timeout=600)
     response.raise_for_status()
@@ -654,6 +663,55 @@ def show_setup_training() -> None:
             st.error(f"Training failed: {exc}")
 
     st.markdown("---")
+    st.subheader("Danger Zone")
+    st.caption("Clears loaded models, FAISS index, dataset metadata, snapshots, and local generated dataset artifacts.")
+    st.warning("Are you sure you want to clear everything? You will have to retrain the models.")
+
+    if hasattr(st, "popover"):
+        with st.popover("Clear Everything"):
+            st.error("This action cannot be undone.")
+            st.write("Are you sure you want to clear everything? You'll have to retrain the models.")
+            confirm_col, cancel_col = st.columns(2)
+            with confirm_col:
+                if st.button("Yes, clear everything", key="confirm_clear_everything_popover", type="primary"):
+                    try:
+                        result = clear_all()
+                        st.success(f"Cleared {result.get('removed_count', 0)} artifacts. Please train models again.")
+                        st.rerun()
+                    except requests.exceptions.HTTPError as exc:
+                        st.error(f"Clear failed: {exc.response.text}")
+                    except Exception as exc:
+                        st.error(f"Clear failed: {exc}")
+            with cancel_col:
+                st.button("Cancel", key="cancel_clear_everything_popover")
+    else:
+        if "confirm_clear_everything" not in st.session_state:
+            st.session_state["confirm_clear_everything"] = False
+
+        if st.button("Clear Everything", key="clear_everything_open_confirm"):
+            st.session_state["confirm_clear_everything"] = True
+
+        if st.session_state.get("confirm_clear_everything", False):
+            st.error("This action cannot be undone.")
+            st.write("Are you sure you want to clear everything? You'll have to retrain the models.")
+            confirm_col, cancel_col = st.columns(2)
+            with confirm_col:
+                if st.button("Yes, clear everything", key="confirm_clear_everything_inline", type="primary"):
+                    try:
+                        result = clear_all()
+                        st.session_state["confirm_clear_everything"] = False
+                        st.success(f"Cleared {result.get('removed_count', 0)} artifacts. Please train models again.")
+                        st.rerun()
+                    except requests.exceptions.HTTPError as exc:
+                        st.error(f"Clear failed: {exc.response.text}")
+                    except Exception as exc:
+                        st.error(f"Clear failed: {exc}")
+            with cancel_col:
+                if st.button("Cancel", key="cancel_clear_everything_inline"):
+                    st.session_state["confirm_clear_everything"] = False
+                    st.rerun()
+
+    st.markdown("---")
     st.subheader("System Status")
     try:
         status_data = call_status()
@@ -832,9 +890,11 @@ def show_ai_suggestions() -> None:
                     token_not_configured = llm_error and "not configured" in llm_error.lower()
                     if token_not_configured:
                         st.info(
-                            "Add a free HUGGINGFACEHUB_API_TOKEN from huggingface.co "
-                            "to enable AI suggestions"
+                            "Running local draft mode (no external LLM token configured)."
                         )
+                        with st.container(border=True):
+                            st.markdown("#### Local Draft Response")
+                            st.write(suggested_response)
                     else:
                         st.warning(
                             "AI suggestion is unavailable. "

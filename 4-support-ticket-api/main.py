@@ -166,7 +166,7 @@ async def suggest_ticket_response(request: SuggestRequest) -> SuggestResponse:
 @app.get("/status", response_model=StatusResponse)
 def status_check() -> StatusResponse:
     dataset_status = services.get_dataset_status()
-    model_state = services.get_model_status(auto_recover=True)
+    model_state = services.get_model_status(auto_recover=False)
     models_status = {
         "loaded": bool(model_state["routing_loaded"]),
         "available": services.get_routing_model_files(),
@@ -382,6 +382,22 @@ def verify_models() -> dict[str, object]:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Verification failed: {exc}",
+        )
+
+
+@app.post("/clear-all")
+def clear_all() -> dict[str, object]:
+    """Clear local dataset/model/index artifacts and reset runtime loaded state."""
+    try:
+        payload = services.clear_all_state()
+        app.state.routing_models_loaded = False
+        app.state.semantic_search_loaded = False
+        app.state.models_loaded = False
+        return payload
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Clear all failed: {exc}",
         )
 
 

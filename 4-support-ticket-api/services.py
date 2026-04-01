@@ -6,6 +6,7 @@ import pickle
 import random
 import hashlib
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -211,10 +212,8 @@ def _find_existing_path(candidates: list[Path]) -> Path:
 
 
 def get_dataset_path() -> Path:
-    try:
-        return _find_existing_path(DATASET_PATHS)
-    except FileNotFoundError:
-        return API_LOCAL_DATASET_PATH
+    # Keep API runtime deterministic by always using the local canonical dataset path.
+    return API_LOCAL_DATASET_PATH
 
 
 def _dataset_metadata_path() -> Path:
@@ -1127,6 +1126,73 @@ def get_model_status(auto_recover: bool = False) -> dict[str, bool]:
     }
 
 
+def clear_all_state() -> dict[str, Any]:
+    """Clear local dataset/model/index artifacts and reset loaded runtime state."""
+    global ROUTING_VECTORIZER, ROUTING_MODEL, LABEL_ENCODER
+    global SEMANTIC_MODEL, SEARCH_INDEX, SEARCH_DATA
+    global MODELS_LOADED, ROUTING_MODELS_LOADED, SEMANTIC_SEARCH_LOADED
+
+    removed: list[str] = []
+
+    # Remove API-local dataset and metadata artifacts.
+    candidate_files = [
+        API_LOCAL_DATASET_PATH,
+        _dataset_metadata_path(),
+        _sqlite_db_path(),
+        API_LOCAL_SEARCH_INDEX_PATH,
+        API_LOCAL_MODEL_DIR / "vectorizer.pkl",
+        API_LOCAL_MODEL_DIR / "lr_model.pkl",
+        API_LOCAL_MODEL_DIR / "label_encoder.pkl",
+        API_LOCAL_MODEL_DIR / "model_performance.json",
+        API_LOCAL_MODEL_DIR / "routing_training_metadata.json",
+    ]
+
+    for file_path in candidate_files:
+        try:
+            if file_path.exists() and file_path.is_file():
+                file_path.unlink()
+                removed.append(str(file_path))
+        except Exception:
+            pass
+
+    # Remove named snapshots and mirrored preview copies.
+    snapshots_dir = API_LOCAL_DATASET_PATH.parent / "named_datasets"
+    snapshot_stems: list[str] = []
+    try:
+        if snapshots_dir.exists() and snapshots_dir.is_dir():
+            snapshot_stems = [p.stem for p in snapshots_dir.glob("*.csv")]
+            shutil.rmtree(snapshots_dir)
+            removed.append(str(snapshots_dir))
+    except Exception:
+        pass
+
+    for stem in snapshot_stems:
+        try:
+            preview_file = DATASET_PREVIEW_DIR / f"{stem}.csv"
+            if preview_file.exists() and preview_file.is_file():
+                preview_file.unlink()
+                removed.append(str(preview_file))
+        except Exception:
+            pass
+
+    # Reset in-memory runtime state.
+    ROUTING_VECTORIZER = None
+    ROUTING_MODEL = None
+    LABEL_ENCODER = None
+    SEMANTIC_MODEL = None
+    SEARCH_INDEX = None
+    SEARCH_DATA = None
+    ROUTING_MODELS_LOADED = False
+    SEMANTIC_SEARCH_LOADED = False
+    MODELS_LOADED = False
+
+    return {
+        "success": True,
+        "removed_count": len(removed),
+        "removed_paths": removed,
+    }
+
+
 def predict_route(description: str) -> tuple[str, float, dict[str, float]]:
     if ROUTING_VECTORIZER is None or ROUTING_MODEL is None or LABEL_ENCODER is None:
         raise RuntimeError("Routing models are not loaded")
@@ -1253,6 +1319,49 @@ def _create_llm_client() -> tuple[Any | None, bool, str | None]:
         return None, False, f"Failed to initialize HuggingFace InferenceClient: {exc}"
 
 
+def _build_local_response_draft(ticket_description: str, context_tickets: list[dict[str, Any]]) -> str:
+    """Create a useful local fallback response when no external LLM is configured."""
+    issue_summary = ticket_description.strip().replace("\n", " ")
+    if len(issue_summary) > 220:
+        issue_summary = issue_summary[:217].rstrip() + "..."
+
+    likely_team = "Support Team"
+    if context_tickets:
+        first_team = str(context_tickets[0].get("assigned_team", "")).strip()
+        if first_team:
+            likely_team = first_team
+
+    next_steps: list[str] = [
+        "Confirm the exact symptoms, scope, and first observed timestamp.",
+        "Collect logs/screenshots and any recent changes before the issue started.",
+        "Apply standard diagnostics and provide an ETA for the next update.",
+    ]
+
+    if context_tickets:
+        similar_ref = []
+        for t in context_tickets[:2]:
+            tid = str(t.get("ticket_id", "")).strip()
+            team = str(t.get("assigned_team", "")).strip()
+            if tid and team:
+                similar_ref.append(f"{tid} ({team})")
+            elif tid:
+                similar_ref.append(tid)
+        reference_text = ", ".join(similar_ref)
+    else:
+        reference_text = "No close historical matches were found"
+
+    return (
+        "Thanks for reporting this issue.\n\n"
+        f"Summary: {issue_summary}\n"
+        f"Recommended owner: {likely_team}\n\n"
+        "Proposed next steps:\n"
+        f"1. {next_steps[0]}\n"
+        f"2. {next_steps[1]}\n"
+        f"3. {next_steps[2]}\n\n"
+        f"Related ticket signals: {reference_text}."
+    )
+
+
 def suggest_response(ticket_description: str) -> dict[str, Any]:
     description = (ticket_description or "").strip()
     if not description:
@@ -1262,14 +1371,12 @@ def suggest_response(ticket_description: str) -> dict[str, Any]:
     llm, llm_available, unavailable_reason = _create_llm_client()
 
     if not llm_available or llm is None:
+        local_draft = _build_local_response_draft(description, context_tickets)
         return {
-            "suggested_response": (
-                "AI response suggestion is available after configuring a HuggingFace API token. "
-                f"Reason: {unavailable_reason}."
-            ),
+            "suggested_response": local_draft,
             "context_tickets": context_tickets,
             "llm_available": False,
-            "llm_error": unavailable_reason,
+            "llm_error": unavailable_reason or "Using local fallback draft",
         }
 
     prompt_template_text = _load_suggest_prompt_template()

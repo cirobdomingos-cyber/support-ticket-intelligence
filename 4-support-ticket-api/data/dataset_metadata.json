@@ -1,8 +1,8 @@
 {
-  "dataset_name": "synthetic-test-dataset-20k",
+  "dataset_name": "synthetic-test-dataset",
   "dataset_source": "synthetic",
-  "dataset_path": "C:\\repo\\support-ticket-intelligence\\1-support-ticket-dataset\\data\\sample_dataset.csv",
-  "row_count": 20000,
-  "saved_at_utc": "2026-04-01T19:07:13.256570+00:00",
-  "snapshot_path": "C:\\repo\\support-ticket-intelligence\\4-support-ticket-api\\data\\named_datasets\\synthetic-test-dataset-20k.csv"
+  "dataset_path": "C:\\repo\\support-ticket-intelligence\\4-support-ticket-api\\data\\sample_dataset.csv",
+  "row_count": 50000,
+  "saved_at_utc": "2026-04-01T20:03:54.244356+00:00",
+  "snapshot_path": "C:\\repo\\support-ticket-intelligence\\4-support-ticket-api\\data\\named_datasets\\synthetic-test-dataset.csv"
 }
