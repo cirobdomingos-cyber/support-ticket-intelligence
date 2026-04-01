@@ -1315,31 +1315,16 @@ def _create_llm_client() -> tuple[Any | None, bool, str | None]:
     if not hf_token:
         return None, False, "HUGGINGFACEHUB_API_TOKEN is not configured"
 
-    repo_id = os.getenv("HUGGINGFACE_REPO_ID", "mistralai/Mistral-7B-Instruct-v0.3")
+    provider = os.getenv("HUGGINGFACE_PROVIDER", "hf-inference").strip() or "hf-inference"
+    repo_id = os.getenv("HUGGINGFACE_REPO_ID", "Qwen/Qwen2.5-7B-Instruct-1M").strip() or "Qwen/Qwen2.5-7B-Instruct-1M"
 
-    # Try langchain_huggingface first; fall through if not installed or fails.
-    try:
-        from langchain_huggingface import HuggingFaceEndpoint
-        try:
-            endpoint = HuggingFaceEndpoint(
-                repo_id=repo_id,
-                huggingfacehub_api_token=hf_token,
-                temperature=0.2,
-                max_new_tokens=256,
-            )
-            return endpoint, True, None
-        except Exception:
-            pass  # Fall back to huggingface_hub.InferenceClient below.
-    except (ImportError, ModuleNotFoundError):
-        pass  # Fall back to huggingface_hub.InferenceClient below.
-
-    # huggingface_hub is always present (sentence-transformers dependency).
+    # Use a single explicit inference path so provider/model behavior is deterministic.
     try:
         from huggingface_hub import InferenceClient
-        client = InferenceClient(token=hf_token)
+        client = InferenceClient(provider=provider, api_key=hf_token)
         return _HFInferenceClientWrapper(client, repo_id), True, None
     except Exception as exc:
-        return None, False, f"Failed to initialize HuggingFace InferenceClient: {exc}"
+        return None, False, f"Failed to initialize HuggingFace InferenceClient for provider '{provider}': {exc}"
 
 
 def _build_local_response_draft(ticket_description: str, context_tickets: list[dict[str, Any]]) -> str:
@@ -1426,9 +1411,10 @@ def suggest_response(ticket_description: str) -> dict[str, Any]:
         }
     except Exception as invoke_exc:
         error_detail = str(invoke_exc)
+        local_draft = _build_local_response_draft(description, context_tickets)
         return {
-            "suggested_response": "LLM call failed — see error detail below.",
+            "suggested_response": local_draft,
             "context_tickets": context_tickets,
             "llm_available": False,
-            "llm_error": error_detail,
+            "llm_error": f"External LLM unavailable, using local fallback draft. Reason: {error_detail}",
         }

@@ -887,21 +887,19 @@ def show_ai_suggestions() -> None:
                         st.markdown("#### Suggested Agent Response")
                         st.write(suggested_response)
                 else:
-                    token_not_configured = llm_error and "not configured" in llm_error.lower()
-                    if token_not_configured:
-                        st.info(
-                            "Running local draft mode (no external LLM token configured)."
+                    fallback_reason = str(llm_error or "Using local fallback draft")
+                    if "not configured" in fallback_reason.lower():
+                        st.info("Running local draft mode (no external LLM token configured).")
+                    else:
+                        st.warning(
+                            "External LLM unavailable. Showing local fallback draft instead. "
+                            + (f"**Reason:** {fallback_reason}" if fallback_reason else "")
                         )
+
+                    if suggested_response:
                         with st.container(border=True):
                             st.markdown("#### Local Draft Response")
                             st.write(suggested_response)
-                    else:
-                        st.warning(
-                            "AI suggestion is unavailable. "
-                            + (f"**Reason:** {llm_error}" if llm_error else "Unknown error.")
-                        )
-                    if suggested_response and not token_not_configured:
-                        st.caption(suggested_response)
 
                 if isinstance(context_tickets, list) and context_tickets:
                     st.markdown("**Context tickets used**")
