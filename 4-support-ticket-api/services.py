@@ -895,12 +895,14 @@ class _HFInferenceClientWrapper:
         self._repo_id = repo_id
 
     def invoke(self, prompt: str) -> str:
-        return self._client.text_generation(
-            prompt,
+        content = prompt.replace("[INST]", "").replace("[/INST]", "").strip()
+        response = self._client.chat_completion(
+            messages=[{"role": "user", "content": content}],
             model=self._repo_id,
-            max_new_tokens=256,
+            max_tokens=256,
             temperature=0.2,
         )
+        return response.choices[0].message.content
 
 
 def _create_llm_client() -> tuple[Any | None, bool, str | None]:
@@ -910,7 +912,7 @@ def _create_llm_client() -> tuple[Any | None, bool, str | None]:
 
     repo_id = os.getenv("HUGGINGFACE_REPO_ID", "mistralai/Mistral-7B-Instruct-v0.3")
 
-    # Try langchain_huggingface first; fall through if not installed.
+    # Try langchain_huggingface first; fall through if not installed or fails.
     try:
         from langchain_huggingface import HuggingFaceEndpoint
         try:
@@ -921,8 +923,8 @@ def _create_llm_client() -> tuple[Any | None, bool, str | None]:
                 max_new_tokens=256,
             )
             return endpoint, True, None
-        except Exception as exc:
-            return None, False, f"Failed to initialize HuggingFace endpoint ({repo_id}): {exc}"
+        except Exception:
+            pass  # Fall back to huggingface_hub.InferenceClient below.
     except (ImportError, ModuleNotFoundError):
         pass  # Fall back to huggingface_hub.InferenceClient below.
 
