@@ -32,13 +32,15 @@ def test_status_returns_expected_shape(client):
     with patch("services.get_dataset_status", return_value={"exists": False, "row_count": 0, "path": ""}), \
          patch("services.get_model_status", return_value={"all_loaded": False, "routing_loaded": False, "semantic_loaded": False}), \
          patch("services.get_faiss_index_status", return_value={"exists": False, "vector_count": 0}), \
-         patch("services.get_routing_model_files", return_value=[]):
+         patch("services.get_routing_model_files", return_value=[]), \
+         patch("services.get_routing_training_metadata", return_value={"dataset_path": "sample.csv", "row_count": 123}):
         r = client.get("/status")
     assert r.status_code == 200
     body = r.json()
     assert "dataset" in body
     assert "models" in body
     assert "faiss_index" in body
+    assert "training_dataset" in body["models"]
 
 
 def test_route_returns_503_when_models_not_loaded(client):
@@ -71,3 +73,27 @@ def test_model_performance_404_before_training(client):
     with patch("services.get_model_performance", side_effect=FileNotFoundError("not found")):
         r = client.get("/model-performance")
     assert r.status_code == 404
+
+
+def test_generate_dataset_passes_training_mapping_options(client):
+    with patch("services.generate_synthetic_dataset", return_value=(Path("sample.csv"), 123)) as mock_generate:
+        r = client.post(
+            "/generate-dataset",
+            json={
+                "include_columns": ["ticket_uuid", "issue_description", "route_team"],
+                "description_column": "issue_description",
+                "assigned_team_column": "",
+                "ticket_id_column": "ticket_uuid",
+                "dataset_name": "my-synthetic-v2",
+            },
+        )
+
+    assert r.status_code == 200
+    assert r.json()["row_count"] == 123
+    mock_generate.assert_called_once_with(
+        include_columns=["ticket_uuid", "issue_description", "route_team"],
+        description_column="issue_description",
+        assigned_team_column="",
+        ticket_id_column="ticket_uuid",
+        dataset_name="my-synthetic-v2",
+    )

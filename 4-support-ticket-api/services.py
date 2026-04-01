@@ -4,6 +4,8 @@ import json
 import os
 import pickle
 import random
+import hashlib
+import re
 import subprocess
 import sys
 import uuid
@@ -38,6 +40,8 @@ BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = BASE_DIR.parent
 API_LOCAL_DATASET_PATH = BASE_DIR / "data" / "sample_dataset.csv"
 API_LOCAL_MODEL_DIR = BASE_DIR / "models"
+# Mirror synthetic datasets here so they appear alongside the bundled samples
+DATASET_PREVIEW_DIR = ROOT_DIR / "1-support-ticket-dataset" / "data"
 API_LOCAL_SEARCH_INDEX_PATH = API_LOCAL_MODEL_DIR / "search_index.pkl"
 
 ROUTING_MODEL_DIRS = [
@@ -213,16 +217,118 @@ def get_dataset_path() -> Path:
         return API_LOCAL_DATASET_PATH
 
 
+def _dataset_metadata_path() -> Path:
+    return API_LOCAL_DATASET_PATH.parent / "dataset_metadata.json"
+
+
+def _sanitize_dataset_name(dataset_name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", dataset_name.strip())
+    cleaned = cleaned.strip("-._")
+    return cleaned or "synthetic-dataset"
+
+
+def _write_named_dataset_snapshot(dataset_path: Path, dataset_name: str | None) -> str | None:
+    if not dataset_name:
+        return None
+    safe_name = _sanitize_dataset_name(dataset_name)
+    snapshots_dir = API_LOCAL_DATASET_PATH.parent / "named_datasets"
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_path = snapshots_dir / f"{safe_name}.csv"
+    snapshot_path.write_bytes(dataset_path.read_bytes())
+    return str(snapshot_path)
+
+
+def _save_dataset_metadata(
+    dataset_path: Path,
+    row_count: int,
+    source: str,
+    dataset_name: str | None = None,
+    snapshot_path: str | None = None,
+) -> None:
+    payload = {
+        "dataset_name": (dataset_name or dataset_path.stem),
+        "dataset_source": source,
+        "dataset_path": str(dataset_path.resolve()),
+        "row_count": int(row_count),
+        "saved_at_utc": datetime.now(tz=timezone.utc).isoformat(),
+        "snapshot_path": snapshot_path,
+    }
+    _dataset_metadata_path().parent.mkdir(parents=True, exist_ok=True)
+    _dataset_metadata_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def get_dataset_metadata() -> dict[str, Any] | None:
+    metadata_path = _dataset_metadata_path()
+    if not metadata_path.exists():
+        return None
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def list_named_snapshots() -> list[dict[str, Any]]:
+    """Return metadata for every named snapshot saved under data/named_datasets/."""
+    snapshots_dir = API_LOCAL_DATASET_PATH.parent / "named_datasets"
+    if not snapshots_dir.is_dir():
+        return []
+    results: list[dict[str, Any]] = []
+    for csv_file in sorted(snapshots_dir.glob("*.csv")):
+        try:
+            row_count = sum(1 for _ in csv_file.open(encoding="utf-8")) - 1  # excluding header
+        except Exception:
+            row_count = -1
+        results.append({"name": csv_file.stem, "path": str(csv_file), "row_count": max(row_count, 0)})
+    return results
+
+
+def load_named_snapshot(name: str) -> int:
+    """Activate a named snapshot as the current working dataset.
+
+    Copies the snapshot CSV over to the canonical dataset path, writes SQLite,
+    and updates dataset metadata. Returns the row count.
+    """
+    import shutil
+
+    safe_name = _sanitize_dataset_name(name)
+    snapshots_dir = API_LOCAL_DATASET_PATH.parent / "named_datasets"
+    snapshot_path = snapshots_dir / f"{safe_name}.csv"
+    if not snapshot_path.exists():
+        raise FileNotFoundError(f"No snapshot found for name '{safe_name}'")
+
+    dest = get_dataset_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(snapshot_path, dest)
+
+    df = pd.read_csv(dest)
+    _write_dataset_to_sqlite(df)
+    _save_dataset_metadata(
+        dest,
+        row_count=int(df.shape[0]),
+        source="synthetic",
+        dataset_name=safe_name,
+        snapshot_path=str(snapshot_path),
+    )
+    return int(df.shape[0])
+
+
 def get_dataset_status() -> dict[str, Any]:
     dataset_path = get_dataset_path()
     exists = dataset_path.exists()
     row_count = 0
     routing_capable = False
+    metadata = get_dataset_metadata() or {}
     if exists:
         try:
             df = pd.read_csv(dataset_path)
             row_count = int(df.shape[0])
-            routing_capable = "assigned_team" in df.columns
+            # Normalize public-alias column names before checking so datasets
+            # saved with e.g. "route_team" are correctly detected as routing-capable.
+            df_norm = _normalize_dataset_columns(df)
+            routing_capable = "assigned_team" in df_norm.columns
         except Exception:
             row_count = 0
     return {
@@ -230,6 +336,8 @@ def get_dataset_status() -> dict[str, Any]:
         "row_count": row_count,
         "path": str(dataset_path),
         "routing_capable": routing_capable,
+        "dataset_name": metadata.get("dataset_name"),
+        "dataset_source": metadata.get("dataset_source"),
     }
 
 
@@ -314,13 +422,21 @@ def execute_sql_query(sql: str, limit: int = 500) -> dict[str, Any]:
         conn.close()
 
 
-def save_dataset_file(file_bytes: bytes) -> tuple[Path, int, list[str]]:
+def save_dataset_file(file_bytes: bytes, dataset_name: str | None = None) -> tuple[Path, int, list[str]]:
     dataset_path = get_dataset_path()
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.read_csv(BytesIO(file_bytes))
     df = _normalize_dataset_columns(df)
     df.to_csv(dataset_path, index=False)
     _write_dataset_to_sqlite(df)
+    snapshot_path = _write_named_dataset_snapshot(dataset_path, dataset_name)
+    _save_dataset_metadata(
+        dataset_path,
+        row_count=int(df.shape[0]),
+        source="upload",
+        dataset_name=dataset_name,
+        snapshot_path=snapshot_path,
+    )
     return dataset_path, int(df.shape[0]), list(df.columns)
 
 
@@ -521,7 +637,105 @@ def _resolve_output_columns(columns: list[str], internal_to_public: dict[str, st
     return output_columns
 
 
-def _generate_synthetic_dataset_in_process(output_path: Path, size: int, include_columns: list[str] | None) -> int:
+def _resolve_optional_output_column(
+    column: str | None,
+    internal_name: str,
+    internal_to_public: dict[str, str],
+) -> str | None:
+    if column is None:
+        return internal_to_public.get(internal_name)
+
+    normalized = str(column).strip()
+    if not normalized:
+        return None
+    return _resolve_output_columns([normalized], internal_to_public)[0]
+
+
+def _prepare_generated_dataset_for_training(
+    dataset: pd.DataFrame,
+    internal_to_public: dict[str, str],
+    include_columns: list[str] | None = None,
+    description_column: str | None = None,
+    assigned_team_column: str | None = None,
+    ticket_id_column: str | None = None,
+) -> pd.DataFrame:
+    resolved_description_column = _resolve_optional_output_column(
+        description_column,
+        "description",
+        internal_to_public,
+    )
+    if resolved_description_column is None:
+        raise ValueError("Synthetic dataset generation requires a mapped description column.")
+
+    resolved_assigned_team_column = _resolve_optional_output_column(
+        assigned_team_column,
+        "assigned_team",
+        internal_to_public,
+    )
+    resolved_ticket_id_column = _resolve_optional_output_column(
+        ticket_id_column,
+        "ticket_id",
+        internal_to_public,
+    )
+
+    if include_columns:
+        selected_columns = _resolve_output_columns(include_columns, internal_to_public)
+        required_selected = [resolved_description_column]
+        if resolved_assigned_team_column is not None:
+            required_selected.append(resolved_assigned_team_column)
+        if resolved_ticket_id_column is not None:
+            required_selected.append(resolved_ticket_id_column)
+
+        missing_selected = [column for column in required_selected if column not in set(selected_columns)]
+        if missing_selected:
+            raise ValueError(
+                "Selected columns must include mapped columns: " + ", ".join(missing_selected)
+            )
+
+        missing_columns = [column for column in selected_columns if column not in dataset.columns]
+        if missing_columns:
+            raise ValueError(f"Configured output columns are not present in generated dataset: {missing_columns}")
+        dataset = dataset[selected_columns].copy()
+    else:
+        dataset = dataset.copy()
+
+    if resolved_description_column not in dataset.columns:
+        raise ValueError(
+            f"Mapped description column '{resolved_description_column}' is not present in generated dataset."
+        )
+    if resolved_assigned_team_column is not None and resolved_assigned_team_column not in dataset.columns:
+        raise ValueError(
+            f"Mapped assigned_team column '{resolved_assigned_team_column}' is not present in generated dataset."
+        )
+    if resolved_ticket_id_column is not None and resolved_ticket_id_column not in dataset.columns:
+        raise ValueError(
+            f"Mapped ticket_id column '{resolved_ticket_id_column}' is not present in generated dataset."
+        )
+
+    rename_map: dict[str, str] = {
+        resolved_description_column: "description",
+    }
+    if resolved_assigned_team_column is not None:
+        rename_map[resolved_assigned_team_column] = "assigned_team"
+    if resolved_ticket_id_column is not None:
+        rename_map[resolved_ticket_id_column] = "ticket_id"
+
+    for source_col, target_col in rename_map.items():
+        if source_col != target_col and target_col in dataset.columns:
+            raise ValueError(
+                f"Cannot map '{source_col}' to '{target_col}' because '{target_col}' already exists in selected columns. "
+                f"Deselect '{target_col}' or choose another mapping."
+            )
+
+    dataset = dataset.rename(columns=rename_map)
+
+    if "ticket_id" not in dataset.columns:
+        dataset.insert(0, "ticket_id", [f"synthetic-{i}" for i in range(len(dataset))])
+
+    return dataset
+
+
+def _build_raw_synthetic_dataset(size: int = 50000) -> pd.DataFrame:
     internal_to_public = _get_internal_to_public_columns()
     dataset = _generate_dataset_frame(size=size)
     dataset = dataset.rename(columns=internal_to_public)
@@ -529,22 +743,58 @@ def _generate_synthetic_dataset_in_process(output_path: Path, size: int, include
     if "created_date" in dataset.columns and "creation_date" not in dataset.columns:
         dataset["creation_date"] = dataset["created_date"]
 
-    if include_columns:
-        selected_columns = _resolve_output_columns(include_columns, internal_to_public)
-        missing_columns = [column for column in selected_columns if column not in dataset.columns]
-        if missing_columns:
-            raise ValueError(f"Configured output columns are not present in generated dataset: {missing_columns}")
-        dataset = dataset[selected_columns]
+    return dataset
+
+
+def _generate_synthetic_dataset_in_process(
+    output_path: Path,
+    size: int,
+    include_columns: list[str] | None,
+    description_column: str | None,
+    assigned_team_column: str | None,
+    ticket_id_column: str | None,
+) -> int:
+    internal_to_public = _get_internal_to_public_columns()
+    dataset = _build_raw_synthetic_dataset(size=size)
+    dataset = _prepare_generated_dataset_for_training(
+        dataset,
+        internal_to_public,
+        include_columns=include_columns,
+        description_column=description_column,
+        assigned_team_column=assigned_team_column,
+        ticket_id_column=ticket_id_column,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     dataset.to_csv(output_path, index=False)
     return int(dataset.shape[0])
 
 
-def generate_synthetic_dataset(size: int = 50000, include_columns: list[str] | None = None) -> tuple[Path, int]:
+def _copy_to_dataset_preview_dir(source_path: Path, dataset_name: str | None) -> None:
+    """Copy a generated dataset CSV into the shared dataset preview folder."""
+    import shutil
+
+    try:
+        DATASET_PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+        stem = _sanitize_dataset_name(dataset_name) if dataset_name else "synthetic_dataset"
+        dest = DATASET_PREVIEW_DIR / f"{stem}.csv"
+        shutil.copy2(source_path, dest)
+    except Exception:
+        pass  # Never block training because of an optional mirror copy
+
+
+def generate_synthetic_dataset(
+    size: int = 50000,
+    include_columns: list[str] | None = None,
+    description_column: str | None = None,
+    assigned_team_column: str | None = None,
+    ticket_id_column: str | None = None,
+    dataset_name: str | None = None,
+) -> tuple[Path, int]:
     script_path = _find_dataset_generator_script()
     output_path = get_dataset_path()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    internal_to_public = _get_internal_to_public_columns()
     if script_path is not None:
         command = [sys.executable, str(script_path), "--size", str(size), "--output", str(output_path)]
         if include_columns:
@@ -564,15 +814,49 @@ def generate_synthetic_dataset(size: int = 50000, include_columns: list[str] | N
                     f"Dataset generator failed: {process.returncode}\nstdout:{process.stdout}\nstderr:{process.stderr}"
                 )
             df = pd.read_csv(output_path)
+            df = _prepare_generated_dataset_for_training(
+                df,
+                internal_to_public,
+                include_columns=include_columns,
+                description_column=description_column,
+                assigned_team_column=assigned_team_column,
+                ticket_id_column=ticket_id_column,
+            )
+            df.to_csv(output_path, index=False)
             _write_dataset_to_sqlite(df)
+            snapshot_path = _write_named_dataset_snapshot(output_path, dataset_name)
+            _save_dataset_metadata(
+                output_path,
+                row_count=int(df.shape[0]),
+                source="synthetic",
+                dataset_name=dataset_name,
+                snapshot_path=snapshot_path,
+            )
+            _copy_to_dataset_preview_dir(output_path, dataset_name)
             return output_path, int(df.shape[0])
         except FileNotFoundError:
             # API-only deployments may not include the external dataset generator path.
             pass
 
-    row_count = _generate_synthetic_dataset_in_process(output_path, size=size, include_columns=include_columns)
+    row_count = _generate_synthetic_dataset_in_process(
+        output_path,
+        size=size,
+        include_columns=include_columns,
+        description_column=description_column,
+        assigned_team_column=assigned_team_column,
+        ticket_id_column=ticket_id_column,
+    )
     df = pd.read_csv(output_path)
     _write_dataset_to_sqlite(df)
+    snapshot_path = _write_named_dataset_snapshot(output_path, dataset_name)
+    _save_dataset_metadata(
+        output_path,
+        row_count=int(df.shape[0]),
+        source="synthetic",
+        dataset_name=dataset_name,
+        snapshot_path=snapshot_path,
+    )
+    _copy_to_dataset_preview_dir(output_path, dataset_name)
     return output_path, row_count
 
 
@@ -683,7 +967,39 @@ def train_routing_models(dataset_path: Path | None = None) -> Path:
         _json.dumps(perf, indent=2), encoding="utf-8"
     )
 
+    dataset_sha256 = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+    dataset_meta = get_dataset_metadata() or {}
+    metadata = {
+        "dataset_path": str(dataset_path.resolve()),
+        "dataset_name": dataset_meta.get("dataset_name"),
+        "dataset_source": dataset_meta.get("dataset_source"),
+        "snapshot_path": dataset_meta.get("snapshot_path"),
+        "row_count": int(df.shape[0]),
+        "dataset_sha256": dataset_sha256,
+        "trained_at_utc": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    (API_LOCAL_MODEL_DIR / "routing_training_metadata.json").write_text(
+        _json.dumps(metadata, indent=2),
+        encoding="utf-8",
+    )
+
     return API_LOCAL_MODEL_DIR
+
+
+def get_routing_training_metadata() -> dict[str, Any] | None:
+    metadata_path = API_LOCAL_MODEL_DIR / "routing_training_metadata.json"
+    if not metadata_path.exists():
+        return None
+
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    return payload
 
 
 def get_model_performance() -> dict[str, Any]:

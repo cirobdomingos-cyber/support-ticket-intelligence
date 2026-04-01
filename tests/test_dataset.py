@@ -47,6 +47,55 @@ def test_normalize_dataset_columns_renames_aliases():
     assert "assigned_team" in result.columns
 
 
+def test_prepare_generated_dataset_for_training_maps_selected_columns():
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {
+            "ticket_uuid": ["t-1"],
+            "issue_description": ["test description"],
+            "route_team": ["Team A"],
+            "severity_level": ["High"],
+        }
+    )
+
+    result = services._prepare_generated_dataset_for_training(
+        df,
+        services._get_internal_to_public_columns(),
+        include_columns=["ticket_uuid", "issue_description", "route_team", "severity_level"],
+        description_column="issue_description",
+        assigned_team_column="route_team",
+        ticket_id_column="ticket_uuid",
+    )
+
+    assert list(result.columns) == ["ticket_id", "description", "assigned_team", "severity_level"]
+
+
+def test_prepare_generated_dataset_for_training_can_skip_team_and_autogenerate_ticket_id():
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {
+            "issue_description": ["test description"],
+            "severity_level": ["High"],
+            "route_team": ["Team A"],
+        }
+    )
+
+    result = services._prepare_generated_dataset_for_training(
+        df,
+        services._get_internal_to_public_columns(),
+        include_columns=["issue_description", "severity_level"],
+        description_column="issue_description",
+        assigned_team_column="",
+        ticket_id_column="",
+    )
+
+    assert "ticket_id" in result.columns
+    assert "assigned_team" not in result.columns
+    assert result.loc[0, "description"] == "test description"
+
+
 def test_generate_ticket_closed_has_resolution_time():
     import random
     random.seed(42)

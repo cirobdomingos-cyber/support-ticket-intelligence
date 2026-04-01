@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -46,11 +46,17 @@ class DatasetStatus(BaseModel):
     row_count: int = Field(..., ge=0, description="Number of rows in the dataset")
     path: str = Field(..., description="Resolved dataset path")
     routing_capable: bool = Field(False, description="Whether the dataset has an assigned_team column enabling routing")
+    dataset_name: str | None = Field(None, description="Optional human-friendly name for the active dataset")
+    dataset_source: str | None = Field(None, description="How the active dataset was created (upload/synthetic)")
 
 
 class ModelsStatus(BaseModel):
     loaded: bool = Field(..., description="Whether routing models are loaded")
     available: list[str] = Field(..., description="Available routing model artifact names")
+    training_dataset: dict[str, Any] | None = Field(
+        default=None,
+        description="Metadata about the dataset used to train the current routing model",
+    )
 
 
 class FaissIndexStatus(BaseModel):
@@ -75,10 +81,47 @@ class GenerateDatasetResponse(BaseModel):
     row_count: int = Field(..., ge=0, description="Number of rows generated")
 
 
+class NamedSnapshotInfo(BaseModel):
+    name: str = Field(..., description="Snapshot name (sanitized filename stem)")
+    path: str = Field(..., description="Absolute path to the snapshot CSV")
+    row_count: int = Field(..., ge=0, description="Number of rows in the snapshot")
+
+
+class LoadSnapshotRequest(BaseModel):
+    name: str = Field(..., description="Name of the snapshot to activate")
+
+
+class LoadSnapshotResponse(BaseModel):
+    success: bool = Field(..., description="Whether the snapshot was activated")
+    row_count: int = Field(..., ge=0, description="Row count of the loaded dataset")
+
+
 class GenerateDatasetRequest(BaseModel):
+    size: int = Field(
+        default=50000,
+        ge=100,
+        le=1000000,
+        description="Number of rows to generate.",
+    )
     include_columns: list[str] = Field(
         default_factory=list,
         description="Optional list of output columns (internal or public aliases)",
+    )
+    description_column: str | None = Field(
+        default=None,
+        description="Column to map to description for training. Null keeps the default synthetic mapping.",
+    )
+    assigned_team_column: str | None = Field(
+        default=None,
+        description="Column to map to assigned_team for routing. Empty string disables team mapping.",
+    )
+    ticket_id_column: str | None = Field(
+        default=None,
+        description="Column to map to ticket_id. Empty string auto-generates ticket ids.",
+    )
+    dataset_name: str | None = Field(
+        default=None,
+        description="Optional human-friendly name to label the generated synthetic dataset.",
     )
 
 

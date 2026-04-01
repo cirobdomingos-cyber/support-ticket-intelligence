@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
@@ -13,7 +14,10 @@ from models import (
     GenerateDatasetRequest,
     GenerateDatasetResponse,
     HealthResponse,
+    LoadSnapshotRequest,
+    LoadSnapshotResponse,
     ModelPerformanceResponse,
+    NamedSnapshotInfo,
     RouteRequest,
     RouteResponse,
     SearchRequest,
@@ -166,6 +170,7 @@ def status_check() -> StatusResponse:
     models_status = {
         "loaded": bool(model_state["routing_loaded"]),
         "available": services.get_routing_model_files(),
+        "training_dataset": services.get_routing_training_metadata(),
     }
     faiss_status = services.get_faiss_index_status()
     return StatusResponse(
@@ -209,7 +214,8 @@ async def upload_dataset(file: UploadFile = File(...)) -> UploadDatasetResponse:
         )
 
     try:
-        _, row_count, columns = services.save_dataset_file(content)
+        upload_name = Path(file.filename).stem if file.filename else None
+        _, row_count, columns = services.save_dataset_file(content, dataset_name=upload_name)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Could not save dataset: {exc}")
 
@@ -219,14 +225,45 @@ async def upload_dataset(file: UploadFile = File(...)) -> UploadDatasetResponse:
 @app.post("/generate-dataset", response_model=GenerateDatasetResponse)
 def generate_dataset(request: GenerateDatasetRequest | None = None) -> GenerateDatasetResponse:
     try:
+        size = 50000 if request is None else request.size
         include_columns = None if request is None else request.include_columns
-        _, row_count = services.generate_synthetic_dataset(include_columns=include_columns)
+        description_column = None if request is None else request.description_column
+        assigned_team_column = None if request is None else request.assigned_team_column
+        ticket_id_column = None if request is None else request.ticket_id_column
+        dataset_name = None if request is None else request.dataset_name
+        _, row_count = services.generate_synthetic_dataset(
+            size=size,
+            include_columns=include_columns,
+            description_column=description_column,
+            assigned_team_column=assigned_team_column,
+            ticket_id_column=ticket_id_column,
+            dataset_name=dataset_name,
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Dataset generation failed: {exc}",
         )
     return GenerateDatasetResponse(success=True, row_count=row_count)
+
+
+@app.get("/list-snapshots", response_model=list[NamedSnapshotInfo])
+def list_snapshots() -> list[NamedSnapshotInfo]:
+    return [NamedSnapshotInfo(**s) for s in services.list_named_snapshots()]
+
+
+@app.post("/load-snapshot", response_model=LoadSnapshotResponse)
+def load_snapshot(request: LoadSnapshotRequest) -> LoadSnapshotResponse:
+    try:
+        row_count = services.load_named_snapshot(request.name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not load snapshot: {exc}",
+        )
+    return LoadSnapshotResponse(success=True, row_count=row_count)
 
 
 def _run_training_pipeline() -> TrainResponse:

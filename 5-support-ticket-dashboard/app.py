@@ -5,13 +5,14 @@ import os
 from io import BytesIO
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
 
-API_URL = os.getenv("API_URL", "https://support-ticket-intelligence-production-795d.up.railway.app")
+API_URL = os.getenv("API_URL", "http://localhost:8000")
+NO_TEAM_COLUMN_OPTION = "(no team column - routing will be disabled)"
+AUTO_GENERATE_TICKET_ID_OPTION = "(auto-generate ticket_id)"
 
 DEFAULT_PUBLIC_TO_INTERNAL_COLUMNS: dict[str, str] = {
     "ticket_uuid": "ticket_id",
@@ -110,6 +111,60 @@ def _synthetic_output_options() -> list[str]:
     return sorted(set(preferred.values()))
 
 
+def _default_index(options: list[str], candidates: list[str]) -> int:
+    for candidate in candidates:
+        if candidate in options:
+            return options.index(candidate)
+    return 0
+
+
+def _render_training_column_mapping(
+    available_columns: list[str],
+    key_prefix: str,
+    intro_text: str,
+) -> tuple[list[str], str | None, str | None, str | None]:
+    st.markdown(intro_text)
+
+    description_column = st.selectbox(
+        "Which column contains ticket description text?",
+        options=available_columns,
+        index=_default_index(available_columns, ["description", "issue_description"]),
+        key=f"{key_prefix}_description",
+    )
+    team_col_options = [NO_TEAM_COLUMN_OPTION] + available_columns
+    assigned_team_column = st.selectbox(
+        "Which column is the assigned team? (optional - needed for routing model)",
+        options=team_col_options,
+        index=_default_index(team_col_options, ["assigned_team", "route_team"]),
+        key=f"{key_prefix}_assigned_team",
+    )
+    ticket_id_options = [AUTO_GENERATE_TICKET_ID_OPTION] + available_columns
+    ticket_id_column = st.selectbox(
+        "Optional: which column should be used as ticket id?",
+        options=ticket_id_options,
+        index=_default_index(ticket_id_options, ["ticket_id", "ticket_uuid"]),
+        key=f"{key_prefix}_ticket_id",
+    )
+
+    selected_columns = st.multiselect(
+        "Columns to include",
+        options=available_columns,
+        default=available_columns,
+        key=f"{key_prefix}_columns",
+    )
+
+    required_selected = [description_column]
+    if assigned_team_column and assigned_team_column != NO_TEAM_COLUMN_OPTION:
+        required_selected.append(assigned_team_column)
+    if ticket_id_column and ticket_id_column != AUTO_GENERATE_TICKET_ID_OPTION:
+        required_selected.append(ticket_id_column)
+    missing_selected = [col for col in required_selected if col not in set(selected_columns)]
+    if missing_selected:
+        st.error("Selected columns must include mapped columns: " + ", ".join(missing_selected))
+
+    return selected_columns, description_column, assigned_team_column, ticket_id_column
+
+
 def load_dataset() -> pd.DataFrame:
     status_payload = call_status()
     dataset_status = status_payload.get("dataset", {})
@@ -137,7 +192,7 @@ def check_health() -> tuple[bool, str]:
         if payload.get("status") == "ok":
             return True, payload.get("models_loaded", False)
         return False, False
-    except Exception as exc:
+    except Exception:
         return False, False
 
 
@@ -213,19 +268,45 @@ def upload_dataset_file(file_bytes: bytes, filename: str) -> dict[str, Any]:
     return response.json()
 
 
-def generate_synthetic_dataset(include_columns: list[str]) -> dict[str, Any]:
+def generate_synthetic_dataset(
+    include_columns: list[str],
+    description_column: str | None = None,
+    assigned_team_column: str | None = None,
+    ticket_id_column: str | None = None,
+    dataset_name: str | None = None,
+    size: int = 50000,
+) -> dict[str, Any]:
     response = requests.post(
         f"{API_URL}/generate-dataset",
-        json={"include_columns": include_columns},
+        json={
+            "size": size,
+            "include_columns": include_columns,
+            "description_column": description_column,
+            "assigned_team_column": assigned_team_column,
+            "ticket_id_column": ticket_id_column,
+            "dataset_name": dataset_name,
+        },
         timeout=1200,
     )
     response.raise_for_status()
     return response.json()
 
 
-def train_routing_models() -> dict[str, Any]:
+def list_snapshots() -> list[dict[str, Any]]:
+    response = requests.get(f"{API_URL}/list-snapshots", timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+def load_snapshot(name: str) -> dict[str, Any]:
+    response = requests.post(f"{API_URL}/load-snapshot", json={"name": name}, timeout=60)
+    response.raise_for_status()
+    return response.json()
+
+
+def train_all_models() -> dict[str, Any]:
     """
-    Train routing models with Railway connection failure recovery.
+    Train routing models and semantic index with Railway connection failure recovery.
     
     If the /train response fails due to connection issues, verify that training
     actually succeeded on the API side by calling /verify-models.
@@ -327,8 +408,17 @@ def show_setup_training() -> None:
     faiss_status = status_data.get("faiss_index", {})
 
     st.subheader("Dataset")
-    left_col, right_col = st.columns(2)
-    with left_col:
+    dataset_mode = st.radio(
+        "Choose dataset flow",
+        options=[
+            "Upload your own CSV",
+            "Generate synthetic dataset",
+            "Load previously generated dataset",
+        ],
+        horizontal=True,
+    )
+
+    if dataset_mode == "Upload your own CSV":
         st.markdown("**Upload your own CSV file**")
         uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"])
 
@@ -363,47 +453,12 @@ def show_setup_training() -> None:
                 df_from_file = None
 
         if df_from_file is not None:
-            st.markdown("Select the columns to keep for upload.")
             available_columns = df_from_file.columns.tolist()
-
-            def _default_index(options: list[str], candidates: list[str]) -> int:
-                for candidate in candidates:
-                    if candidate in options:
-                        return options.index(candidate)
-                return 0
-
-            description_column = st.selectbox(
-                "Which column contains ticket description text?",
-                options=available_columns,
-                index=_default_index(available_columns, ["description", "issue_description"]),
+            selected_columns, description_column, assigned_team_column, ticket_id_column = _render_training_column_mapping(
+                available_columns,
+                key_prefix="upload",
+                intro_text="Select the columns to keep for upload.",
             )
-            team_col_options = ["(no team column — routing will be disabled)"] + available_columns
-            assigned_team_column = st.selectbox(
-                "Which column is the assigned team? (optional — needed for routing model)",
-                options=team_col_options,
-                index=_default_index(team_col_options, ["assigned_team", "route_team"]),
-            )
-            ticket_id_options = ["(auto-generate ticket_id)"] + available_columns
-            ticket_id_column = st.selectbox(
-                "Optional: which column should be used as ticket id?",
-                options=ticket_id_options,
-                index=_default_index(ticket_id_options, ["ticket_id", "ticket_uuid"]),
-            )
-
-            selected_columns = st.multiselect(
-                "Columns to include",
-                options=available_columns,
-                default=available_columns,
-            )
-
-            required_selected = [description_column]
-            if assigned_team_column and assigned_team_column != "(no team column — routing will be disabled)":
-                required_selected.append(assigned_team_column)
-            if ticket_id_column and ticket_id_column != "(auto-generate ticket_id)":
-                required_selected.append(ticket_id_column)
-            missing_selected = [col for col in required_selected if col not in set(selected_columns)]
-            if missing_selected:
-                st.error("Selected columns must include mapped columns: " + ", ".join(missing_selected))
 
         if st.button("Upload & Validate", key="upload_dataset"):
             if uploaded_file is None:
@@ -421,9 +476,9 @@ def show_setup_training() -> None:
                     rename_map: dict[str, str] = {
                         description_column: "description",
                     }
-                    if assigned_team_column and assigned_team_column != "(no team column — routing will be disabled)":
+                    if assigned_team_column and assigned_team_column != NO_TEAM_COLUMN_OPTION:
                         rename_map[assigned_team_column] = "assigned_team"
-                    if ticket_id_column and ticket_id_column != "(auto-generate ticket_id)":
+                    if ticket_id_column and ticket_id_column != AUTO_GENERATE_TICKET_ID_OPTION:
                         rename_map[ticket_id_column] = "ticket_id"
 
                     # Avoid duplicate canonical columns after rename.
@@ -454,28 +509,104 @@ def show_setup_training() -> None:
                 except Exception as exc:
                     st.error(f"Upload failed: {exc}")
 
-    with right_col:
+    elif dataset_mode == "Generate synthetic dataset":
         st.markdown("**Generate synthetic dataset**")
+        synthetic_dataset_name = st.text_input(
+            "Synthetic dataset name",
+            value="synthetic-test-dataset",
+            help="Optional label used to identify this generated dataset in status and model metadata.",
+        )
+        synthetic_row_count = st.number_input(
+            "Number of rows",
+            min_value=100,
+            max_value=1_000_000,
+            value=50_000,
+            step=1000,
+            help="How many rows to generate. Larger datasets take longer but improve model accuracy.",
+        )
         synthetic_options = _synthetic_output_options()
-        synthetic_columns = st.multiselect(
-            "Synthetic output columns",
-            options=synthetic_options,
-            default=synthetic_options,
-            help="Choose which public-safe columns to include in generated dataset.",
+        st.caption("Choose which public-safe columns to include in the generated dataset and how they should map for training.")
+        (
+            synthetic_columns,
+            synthetic_description_column,
+            synthetic_assigned_team_column,
+            synthetic_ticket_id_column,
+        ) = _render_training_column_mapping(
+            synthetic_options,
+            key_prefix="synthetic",
+            intro_text="Choose which generated columns should be kept and used for training.",
         )
         if st.button("Generate Synthetic Dataset", key="generate_dataset"):
-            try:
-                with st.spinner("Generating dataset..."):
-                    result = generate_synthetic_dataset(synthetic_columns)
-                st.success(f"Dataset generated with {result['row_count']} rows.")
+            if len(synthetic_columns) == 0:
+                st.error("Please select at least one synthetic column to include.")
+            elif synthetic_description_column is None:
+                st.error("Please map the description column.")
+            else:
                 try:
-                    preview_df = load_dataset().head(5)
+                    with st.spinner("Generating dataset..."):
+                        result = generate_synthetic_dataset(
+                            synthetic_columns,
+                            description_column=synthetic_description_column,
+                            assigned_team_column=(
+                                ""
+                                if synthetic_assigned_team_column == NO_TEAM_COLUMN_OPTION
+                                else synthetic_assigned_team_column
+                            ),
+                            ticket_id_column=(
+                                ""
+                                if synthetic_ticket_id_column == AUTO_GENERATE_TICKET_ID_OPTION
+                                else synthetic_ticket_id_column
+                            ),
+                            dataset_name=(synthetic_dataset_name.strip() or None),
+                            size=int(synthetic_row_count),
+                        )
+                    st.success(f"Dataset generated with {result['row_count']} rows.")
+                    if synthetic_assigned_team_column == NO_TEAM_COLUMN_OPTION:
+                        st.info(
+                            "No team column was mapped - ticket routing and model training will be disabled. "
+                            "Search, KPI, Data Quality, SQL Explorer, and AI Suggestions remain available."
+                        )
+                    try:
+                        preview_df = load_dataset().head(5)
+                    except Exception as exc:
+                        st.warning(f"Generated dataset created but preview failed: {exc}")
+                except requests.exceptions.HTTPError as exc:
+                    st.error(f"Generation failed: {exc.response.text}")
                 except Exception as exc:
-                    st.warning(f"Generated dataset created but preview failed: {exc}")
-            except requests.exceptions.HTTPError as exc:
-                st.error(f"Generation failed: {exc.response.text}")
-            except Exception as exc:
-                st.error(f"Generation failed: {exc}")
+                    st.error(f"Generation failed: {exc}")
+
+    else:
+        st.markdown("**Load a previously generated dataset**")
+        try:
+            snapshots = list_snapshots()
+        except Exception:
+            snapshots = []
+
+        if not snapshots:
+            st.info("No saved datasets yet. Generate a synthetic dataset with a name to create one.")
+        else:
+            snapshot_names = [s["name"] for s in snapshots]
+            snapshot_labels = {
+                s["name"]: f"{s['name']}  ({s['row_count']:,} rows)" for s in snapshots
+            }
+            selected_snapshot = st.selectbox(
+                "Saved datasets",
+                options=snapshot_names,
+                format_func=lambda n: snapshot_labels.get(n, n),
+                key="load_snapshot_select",
+            )
+            if st.button("Load selected dataset", key="load_snapshot_btn"):
+                try:
+                    with st.spinner(f"Loading '{selected_snapshot}'..."):
+                        result = load_snapshot(selected_snapshot)
+                    st.success(
+                        f"Dataset '{selected_snapshot}' loaded — {result['row_count']:,} rows. Re-train models to use it."
+                    )
+                    preview_df = load_dataset().head(5)
+                except requests.exceptions.HTTPError as exc:
+                    st.error(f"Load failed: {exc.response.text}")
+                except Exception as exc:
+                    st.error(f"Load failed: {exc}")
 
     if preview_df is not None:
         st.markdown("---")
@@ -483,11 +614,12 @@ def show_setup_training() -> None:
         st.dataframe(preview_df.head(5))
 
     st.markdown("---")
-    st.subheader("Train Models")
-    if st.button("Train Routing Models", key="train_models"):
+    st.subheader("Load and Train")
+    st.caption("This action trains routing and rebuilds FAISS in one run.")
+    if st.button("Train Routing + Semantic Index", key="train_models"):
         try:
-            with st.spinner("Training routing models (this may take a few minutes)..."):
-                result = train_routing_models()
+            with st.spinner("Training routing models and rebuilding FAISS (this may take a few minutes)..."):
+                result = train_all_models()
             if result.get("success"):
                 st.success(result.get("status", "Training completed."))
                 if result.get("artifacts_path"):
@@ -522,19 +654,15 @@ def show_setup_training() -> None:
             st.error(f"Training failed: {exc}")
 
     st.markdown("---")
-    st.subheader("Build Search Index")
-    if st.button("Build Semantic Search Index", key="build_index"):
-        try:
-            with st.spinner("Building FAISS index..."):
-                result = build_search_index()
-            st.success(f"Index built with {result['vector_count']} vectors.")
-        except requests.exceptions.HTTPError as exc:
-            st.error(f"Index build failed: {exc.response.text}")
-        except Exception as exc:
-            st.error(f"Index build failed: {exc}")
-
-    st.markdown("---")
     st.subheader("System Status")
+    try:
+        status_data = call_status()
+        dataset_status = status_data.get("dataset", {})
+        models_status = status_data.get("models", {})
+        faiss_status = status_data.get("faiss_index", {})
+    except requests.exceptions.RequestException as exc:
+        st.error(f"Could not refresh status: {exc}")
+
     if st.button("Refresh status", key="refresh_status"):
         try:
             status_data = call_status()
@@ -554,13 +682,51 @@ def show_setup_training() -> None:
     with badge_col2:
         render_status_badge("Models", models_ready)
     with badge_col3:
-        render_status_badge("Search Index", faiss_ready)
+        render_status_badge("Semantic (FAISS)", faiss_ready)
 
-    st.write("- Dataset rows: ", dataset_status.get("row_count", 0))
-    st.write("- Routing models loaded: ", models_ready)
     routing_capable = bool(dataset_status.get("routing_capable", False))
-    st.write("- Routing-capable dataset (assigned_team present): ", routing_capable)
-    st.write("- FAISS vectors: ", faiss_status.get("vector_count", 0))
+    active_name = dataset_status.get("dataset_name", "-")
+    active_source = dataset_status.get("dataset_source", "-")
+    active_rows = int(dataset_status.get("row_count", 0))
+    faiss_vectors = int(faiss_status.get("vector_count", 0))
+
+    st.markdown("**Current Dataset**")
+    st.write("- Name:", active_name)
+    st.write("- Source:", active_source)
+    st.write("- Rows:", active_rows)
+    st.write("- Routing-capable:", routing_capable)
+
+    st.markdown("**Model State**")
+    st.write("- Routing models loaded:", models_ready)
+    st.write("- Semantic vectors (FAISS):", faiss_vectors)
+
+    training_dataset = models_status.get("training_dataset")
+    st.markdown("**Last Training**")
+    if isinstance(training_dataset, dict):
+        trained_name = training_dataset.get("dataset_name")
+        trained_source = training_dataset.get("dataset_source")
+        trained_rows = training_dataset.get("row_count", "-")
+        trained_at = training_dataset.get("trained_at_utc", "-")
+        dataset_hash = str(training_dataset.get("dataset_sha256", ""))
+
+        same_dataset_identity = (
+            (trained_name == active_name)
+            and (trained_source == active_source)
+            and (int(trained_rows) == active_rows if str(trained_rows).isdigit() else False)
+        )
+
+        if same_dataset_identity:
+            st.write("- Dataset:", "Matches current active dataset")
+        else:
+            st.write("- Dataset name:", trained_name or "-")
+            st.write("- Dataset source:", trained_source or "-")
+
+        st.write("- Trained at (UTC):", trained_at)
+        st.write("- Training rows:", trained_rows)
+        if dataset_hash:
+            st.write("- Dataset hash:", dataset_hash)
+    else:
+        st.write("- No training metadata available yet")
 
     if dataset_ready and not routing_capable:
         st.info(
