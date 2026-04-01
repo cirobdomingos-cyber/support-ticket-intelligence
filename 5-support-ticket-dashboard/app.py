@@ -1331,10 +1331,17 @@ def main() -> None:
 
     status_payload = safe_call_status()
     connected = bool(status_payload)
-    models_loaded = status_payload.get("models", {}).get("loaded", False)
+    routing_capable = status_payload.get("dataset", {}).get("routing_capable", False)
+    routing_models_loaded = status_payload.get("models", {}).get("loaded", False)
+    dataset_ready = status_payload.get("dataset", {}).get("exists", False)
+    faiss_ready = status_payload.get("faiss_index", {}).get("exists", False)
+
+    # Basic pages require dataset + FAISS index; routing pages additionally require trained routing models.
+    modules_ready = dataset_ready and faiss_ready
+    routing_ready = routing_capable and routing_models_loaded
 
     if connected:
-        status_text = "Connected" if models_loaded else "Connected, models loading"
+        status_text = "Connected" if modules_ready else "Connected (setting up...)"
         status_color = "✅"
     else:
         status_text = "Disconnected"
@@ -1344,20 +1351,13 @@ def main() -> None:
     st.sidebar.write(f"{status_color} {status_text}")
     st.sidebar.write(f"API URL: `{API_URL}`")
 
-    modules_ready = (
-        status_payload.get("dataset", {}).get("exists", False)
-        and status_payload.get("models", {}).get("loaded", False)
-        and status_payload.get("faiss_index", {}).get("exists", False)
-    )
-    routing_capable = status_payload.get("dataset", {}).get("routing_capable", False)
-
     available_pages = ["Overview", "Setup & Training"]
     if modules_ready:
         available_pages += ["KPI", "Data Quality", "SQL Explorer"]
-        if routing_capable:
+        if routing_ready:
             available_pages += ["Model Performance"]
         available_pages += ["Search"]
-        if routing_capable:
+        if routing_ready:
             available_pages += ["Route"]
         available_pages += ["AI Suggestions"]
 

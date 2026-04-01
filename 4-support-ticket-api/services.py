@@ -909,7 +909,7 @@ def _create_llm_client() -> tuple[Any | None, bool, str | None]:
     if not hf_token:
         return None, False, "HUGGINGFACEHUB_API_TOKEN is not configured"
 
-    repo_id = os.getenv("HUGGINGFACE_REPO_ID", "mistralai/Mistral-7B-Instruct-v0.2")
+    repo_id = os.getenv("HUGGINGFACE_REPO_ID", "mistralai/Mistral-7B-Instruct-v0.3")
 
     # Try langchain_huggingface first; fall through if not installed.
     try:
