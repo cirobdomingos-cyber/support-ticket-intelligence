@@ -19,15 +19,17 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
     Write-Host "      Creating venv..." -ForegroundColor Gray
     python -m venv .venv
     Write-Host "      Installing dbt-duckdb..." -ForegroundColor Gray
-    .\.venv\Scripts\pip.exe install dbt-duckdb --quiet
+    .\.venv\Scripts\python.exe -m pip install dbt-duckdb --quiet
 }
+
+$dbtPy = ".\.venv\Scripts\python.exe"
 
 if (-not (Test-Path "dbt_packages")) {
     Write-Host "      Installing dbt packages..." -ForegroundColor Gray
-    .\.venv\Scripts\dbt.exe deps --profiles-dir . --quiet
+    & $dbtPy -m dbt deps --profiles-dir . --quiet
 }
 
-.\.venv\Scripts\dbt.exe build --profiles-dir .
+& $dbtPy -m dbt build --profiles-dir .
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "dbt build failed. Fix the errors above before continuing." -ForegroundColor Red

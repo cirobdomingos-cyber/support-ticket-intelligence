@@ -3,12 +3,17 @@ Set-Location "$PSScriptRoot\5-support-ticket-dashboard"
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
     Write-Host "Creating venv..." -ForegroundColor Gray
     python -m venv .venv
+}
+
+$py = ".\.venv\Scripts\python.exe"
+
+if (-not (Test-Path ".venv\Lib\site-packages\streamlit")) {
     Write-Host "Installing dependencies..." -ForegroundColor Gray
-    .\.venv\Scripts\pip.exe install -r requirements.txt
+    & $py -m pip install -r requirements.txt
 }
 
 $env:DUCKDB_PATH = "$PSScriptRoot\6-dbt-analytics\dev.duckdb"
 $env:API_URL     = "http://localhost:8000"
 
 Write-Host "Dashboard starting at http://localhost:8501" -ForegroundColor Green
-.\.venv\Scripts\streamlit.exe run app.py
+& $py -m streamlit run app.py
