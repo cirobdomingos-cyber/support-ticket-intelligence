@@ -1,0 +1,58 @@
+version: '3.9'
+
+# ---------------------------------------------------------------------------
+# Local development compose file — repo root
+#
+# Services:
+#   dbt      : builds the analytics layer, produces dev.duckdb on a
+#              named volume. Exits when build is complete.
+#   dashboard: waits for dbt to finish, then serves Streamlit on :8501.
+#              Mounts the same volume read-only for DuckDB access.
+#   api      : the existing FastAPI service (routing, search, AI suggestions).
+#              Dashboard talks to it for non-analytics features.
+#
+# Usage:
+#   docker compose up --build
+#   # Open http://localhost:8501
+#
+# Rebuild analytics only (e.g. after changing a dbt model):
+#   docker compose run --rm dbt
+#   docker compose restart dashboard
+# ---------------------------------------------------------------------------
+
+services:
+
+  dbt:
+    build:
+      context: ./6-dbt-analytics
+      dockerfile: Dockerfile
+    volumes:
+      - analytics_db:/analytics
+    # The image already runs dbt build during its own build step (RUN dbt build).
+    # This command is a no-op that lets compose track completion cleanly.
+    command: ["echo", "dbt build complete"]
+    restart: "no"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      DUCKDB_PATH: /app/dev.duckdb
+      API_URL: http://api:8000
+    depends_on:
+      dbt:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./4-support-ticket-api
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+volumes:
+  analytics_db:

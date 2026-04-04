@@ -1,0 +1,21 @@
+# ---------------------------------------------------------------------------
+# profiles.yml — dbt connection configuration
+#
+# IMPORTANT: In a team environment this file lives at ~/.dbt/profiles.yml and
+# is NEVER committed to version control (it may contain credentials).
+# For this local DuckDB project there are no secrets, so we keep it in the
+# repo root for portability. The .gitignore excludes it by default — override
+# that if you want to share this zero-credential setup.
+#
+# DuckDB creates a local .duckdb file at the path below. Delete it and run
+# `dbt seed && dbt run` to rebuild from scratch at any time.
+# ---------------------------------------------------------------------------
+support_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "dev.duckdb"    # relative to project root
+      threads: 4
+      extensions:
+        - httpfs             # enables reading remote Parquet/CSV if needed later
