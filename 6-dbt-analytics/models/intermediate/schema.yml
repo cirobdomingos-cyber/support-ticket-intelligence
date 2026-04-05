@@ -1,0 +1,75 @@
+version: 2
+
+models:
+  - name: int_tickets_enriched
+    description: >
+      Enriched ticket view that adds all derived business logic on top of the
+      staging model. This is the single source of truth for SLA breach
+      classification, resolution time metrics, and calendar keys.
+      All mart models build from this model — never from staging directly.
+
+    columns:
+      - name: ticket_id
+        description: "UUID primary key, inherited from staging."
+        tests:
+          - unique
+          - not_null
+
+      - name: is_closed
+        description: "True when ticket_status = 'Closed'."
+        tests:
+          - not_null
+
+      - name: is_open
+        description: "True when ticket_status != 'Closed'."
+        tests:
+          - not_null
+
+      - name: is_warranty_claim
+        description: "True when service_request_type is 'Warranty Claim' (case-insensitive)."
+
+      - name: is_critical
+        description: "True when severity_level = 'Critical'."
+
+      - name: is_high_severity
+        description: "True when severity_level is 'Critical' or 'High'."
+
+      - name: is_sla_breach
+        description: >
+          True when the ticket exceeded its severity SLA threshold.
+          Thresholds: Critical=24h, High=48h, Medium=72h, Low=96h.
+          Open tickets are evaluated against elapsed time since creation.
+          Null when created_at is missing.
+
+      - name: resolution_hours
+        description: "resolution_seconds / 3600. Null for open tickets."
+
+      - name: resolution_days
+        description: "resolution_seconds / 86400. Null for open tickets."
+
+      - name: first_queue_hours
+        description: "first_queue_seconds / 3600."
+
+      - name: resolution_bucket
+        description: >
+          Human-readable resolution time bucket.
+          Values: 'Open', '0–4h', '4–24h', '24–72h', '3–7 days', '7+ days'.
+
+      - name: created_month
+        description: "First day of the calendar month of ticket creation (date type)."
+
+      - name: created_year
+        description: "Four-digit year of ticket creation."
+
+      - name: created_month_num
+        description: "Month number (1–12) of ticket creation."
+
+      - name: created_quarter
+        description: "Quarter number (1–4) of ticket creation."
+
+      - name: created_day_of_week
+        description: "Day of week integer (0=Sunday, 6=Saturday) of ticket creation."
+
+      - name: days_open
+        description: >
+          Days between created_date and closed_date (or today for open tickets).

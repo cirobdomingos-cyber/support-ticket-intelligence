@@ -52,8 +52,9 @@ Thumbs.db
 sample_dataset.csv
 **/data/sample_dataset.csv
 
-# Model and result directories
+# Model and result directories (ML artifacts — not dbt models/)
 **/models/
+!6-dbt-analytics/models/
 **/results/
 **/logs/
 **/*.cache
