@@ -2,7 +2,7 @@ Set-Location "$PSScriptRoot\5-support-ticket-dashboard"
 
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
     Write-Host "Creating venv..." -ForegroundColor Gray
-    python -m venv .venv
+    py -3.12 -m venv .venv
 }
 
 $py = ".\.venv\Scripts\python.exe"

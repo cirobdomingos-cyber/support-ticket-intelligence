@@ -17,7 +17,7 @@ Set-Location "$Root\6-dbt-analytics"
 
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
     Write-Host "      Creating venv..." -ForegroundColor Gray
-    python -m venv .venv
+    py -3.12 -m venv .venv
     Write-Host "      Installing dbt-duckdb..." -ForegroundColor Gray
     .\.venv\Scripts\python.exe -m pip install dbt-duckdb --quiet
 }
