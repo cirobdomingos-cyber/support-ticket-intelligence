@@ -1,0 +1,142 @@
+version: 2
+
+models:
+  - name: mart_ticket_kpis
+    description: >
+      Wide fact table. One row per support ticket with all classification,
+      timing, SLA, and geography fields denormalised for BI drill-through.
+      Filters in BI tools (team, severity, date range) are applied at query
+      time against this table via SQL WHERE clauses.
+
+    columns:
+      - name: ticket_id
+        description: "UUID primary key."
+        tests:
+          - unique
+          - not_null
+
+      - name: severity_level
+        description: "Severity classification."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Low', 'Medium', 'High', 'Critical']
+
+      - name: ticket_status
+        description: "Current lifecycle status."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Open', 'Closed']
+
+      - name: is_sla_breach
+        description: "True when ticket exceeded its severity SLA threshold."
+
+      - name: resolution_hours
+        description: "Time to close in hours. Null for open tickets."
+        tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              mostly: 0.99
+
+      - name: created_date
+        description: "Calendar date the ticket was created."
+        tests:
+          - not_null
+
+      - name: assigned_team
+        description: "Team currently responsible."
+        tests:
+          - not_null
+
+
+  - name: mart_team_workload
+    description: >
+      Aggregated team performance by calendar month. One row per team per month.
+      Pre-computes SLA breach rate, resolution time statistics, and workload
+      composition (warranty %, critical %) for trend analysis.
+
+    columns:
+      - name: assigned_team
+        description: "Team identifier."
+        tests:
+          - not_null
+
+      - name: created_month
+        description: "First day of the calendar month (date type)."
+        tests:
+          - not_null
+
+      - name: total_tickets
+        description: "All tickets created in this team-month."
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+
+      - name: sla_breach_rate_pct
+        description: "% of closed tickets that breached SLA. Null if no closed tickets."
+
+      - name: avg_resolution_hours
+        description: "Mean resolution time in hours for closed tickets."
+
+
+  - name: mart_dealer_performance
+    description: >
+      Aggregated dealer quality metrics by calendar month.
+      One row per dealer per month. Used to identify underperforming dealers
+      and track improvement over time.
+
+    columns:
+      - name: dealer_code
+        description: "Unique dealer identifier."
+        tests:
+          - not_null
+
+      - name: created_month
+        description: "First day of the calendar month (date type)."
+        tests:
+          - not_null
+
+      - name: total_tickets
+        description: "All tickets from this dealer in this month."
+        tests:
+          - not_null
+
+      - name: sla_breach_rate_pct
+        description: "% of closed tickets that breached SLA for this dealer-month."
+
+      - name: distinct_vehicles
+        description: "Number of unique vehicles that generated tickets this month."
+
+
+  - name: mart_product_defects
+    description: >
+      Aggregated defect analysis by product family, component, and fault code.
+      One row per unique (product_family, component_name, fault_code) combination.
+      Used by quality engineering to prioritise design improvements.
+
+    columns:
+      - name: product_family
+        description: "High-level product group."
+        tests:
+          - not_null
+
+      - name: fault_code
+        description: "Diagnostic fault code."
+
+      - name: total_tickets
+        description: "Total ticket volume for this defect pattern."
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+
+      - name: affected_vehicles
+        description: "Distinct vehicle chassis affected by this defect pattern."
+
+      - name: warranty_rate_pct
+        description: "% of tickets for this pattern classified as warranty claims."
+
+      - name: sla_breach_rate_pct
+        description: "% of closed tickets for this defect pattern that breached SLA."
