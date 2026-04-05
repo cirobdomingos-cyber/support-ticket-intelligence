@@ -5,12 +5,22 @@ import os
 from io import BytesIO
 from typing import Any
 
+import duckdb
 import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
+
+# Path to the dbt-generated DuckDB file.
+# Set via DUCKDB_PATH env var; defaults to the analytics/ subdirectory so
+# `cd 5-support-ticket-dashboard && streamlit run app.py` works after running
+# `dbt build` in 6-dbt-analytics/ and copying (or symlinking) dev.duckdb here.
+_DUCKDB_PATH = os.getenv(
+    "DUCKDB_PATH",
+    os.path.join(os.path.dirname(__file__), "dev.duckdb"),
+)
 NO_TEAM_COLUMN_OPTION = "(no team column - routing will be disabled)"
 AUTO_GENERATE_TICKET_ID_OPTION = "(auto-generate ticket_id)"
 
@@ -913,310 +923,353 @@ def show_ai_suggestions() -> None:
                 st.error(f"Unexpected error: {exc}")
 
 
-_SLA_HOURS: dict[str, int] = {"Critical": 24, "High": 48, "Medium": 72, "Low": 96}
-_DEFAULT_SLA_HOURS = 72
+def _analytics_con() -> duckdb.DuckDBPyConnection | None:
+    """Return a read-only DuckDB connection to the dbt-built analytics file,
+    or None if the file does not exist yet."""
+    if not os.path.exists(_DUCKDB_PATH):
+        return None
+    try:
+        return duckdb.connect(_DUCKDB_PATH, read_only=True)
+    except Exception:
+        return None
 
 
-def _compute_sla_breach(row: Any, now: pd.Timestamp) -> bool:
-    """Return True if the ticket violated its SLA threshold."""
-    threshold_h = _SLA_HOURS.get(str(row.get("severity", "")), _DEFAULT_SLA_HOURS)
-    threshold_s = threshold_h * 3600
-    ttc = row.get("time_to_close_seconds")
-    if ttc not in (None, "", float("nan")):
-        try:
-            return float(ttc) > threshold_s
-        except (ValueError, TypeError):
-            pass
-    # Open ticket — measure elapsed time from creation
-    created = row.get("_created_dt")
-    if created is not pd.NaT and created is not None:
-        elapsed_s = (now - created).total_seconds()
-        return elapsed_s > threshold_s
-    return False
+def _analytics_unavailable_message() -> None:
+    st.warning(
+        "Analytics database not found. "
+        "Run `dbt build` in the `6-dbt-analytics/` directory first.",
+        icon="⚠️",
+    )
+    st.code(
+        "cd 6-dbt-analytics\n"
+        "pip install dbt-duckdb\n"
+        "dbt deps\n"
+        "dbt build",
+        language="bash",
+    )
+    st.caption(f"Expected path: `{_DUCKDB_PATH}`")
 
 
 def show_kpi_analytics() -> None:
+    """KPI Analytics — powered by pre-computed dbt marts in DuckDB.
+
+    Data flow: seeds/support_tickets.csv
+               → dbt staging → intermediate (SLA logic) → marts
+               → dev.duckdb → this function
+
+    All aggregations and SLA breach classification happen at dbt build time,
+    not at page load. This function only reads and visualises.
+    """
     st.header("KPI Analytics")
+    st.caption("Powered by dbt · DuckDB — metrics pre-computed at build time")
 
-    try:
-        df = load_dataset()
-    except FileNotFoundError as exc:
-        st.error(str(exc))
-        return
-    except Exception as exc:
-        st.error(f"Could not load dataset: {exc}")
+    con = _analytics_con()
+    if con is None:
+        _analytics_unavailable_message()
         return
 
-    df = df.copy()
-    has_team_col = "assigned_team" in df.columns
-    if has_team_col:
-        df["assigned_team"] = df["assigned_team"].fillna("Unknown")
+    # ── Build filter options from the mart ───────────────────────────────────
+    teams = ["All"] + con.execute(
+        "SELECT DISTINCT assigned_team FROM marts.mart_ticket_kpis "
+        "WHERE assigned_team IS NOT NULL ORDER BY 1"
+    ).df()["assigned_team"].tolist()
 
-    # Parse creation date
-    for col in ["creation_date", "creation_datetime", "created_date", "created_timestamp"]:
-        if col in df.columns:
-            df["_created_dt"] = pd.to_datetime(df[col], errors="coerce")
-            break
-    else:
-        df["_created_dt"] = pd.NaT
+    severities = ["All"] + con.execute(
+        "SELECT DISTINCT severity_level FROM marts.mart_ticket_kpis "
+        "WHERE severity_level IS NOT NULL ORDER BY 1"
+    ).df()["severity_level"].tolist()
 
-    now = pd.Timestamp.now()
+    bounds = con.execute(
+        "SELECT MIN(created_date), MAX(created_date) FROM marts.mart_ticket_kpis"
+    ).fetchone()
+    min_d, max_d = bounds[0], bounds[1]
 
-    # ── Filters ──────────────────────────────────────────────────────────────
+    # ── Filters UI ───────────────────────────────────────────────────────────
     with st.expander("Filters", expanded=True):
-        num_filter_cols = 3 if has_team_col else 2
-        filter_cols = st.columns(num_filter_cols)
-        sel_team = "All"
-        if has_team_col:
-            teams = ["All"] + sorted(df["assigned_team"].dropna().unique().tolist())
-            sel_team = filter_cols[0].selectbox("Team", teams)
+        fc = st.columns(3)
+        sel_team = fc[0].selectbox("Team", teams)
+        sel_sev  = fc[1].selectbox("Severity", severities)
+        date_range = fc[2].date_input(
+            "Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d
+        )
 
-        sev_col_idx = 1 if has_team_col else 0
-        date_col_idx = 2 if has_team_col else 1
-        severities = ["All"]
-        if "severity" in df.columns:
-            severities += sorted(df["severity"].dropna().unique().tolist())
-        sel_sev = filter_cols[sev_col_idx].selectbox("Severity", severities)
+    # Build WHERE clauses — filter values come from the DB so no injection risk
+    where: list[str] = []
+    if sel_team != "All":
+        where.append(f"assigned_team = '{sel_team}'")
+    if sel_sev != "All":
+        where.append(f"severity_level = '{sel_sev}'")
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        where.append(f"created_date BETWEEN DATE '{date_range[0]}' AND DATE '{date_range[1]}'")
+    w = ("WHERE " + " AND ".join(where)) if where else ""
 
-        valid_dates = df["_created_dt"].dropna()
-        if not valid_dates.empty:
-            min_d = valid_dates.min().date()
-            max_d = valid_dates.max().date()
-            date_range = filter_cols[date_col_idx].date_input("Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
-            if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-                d_start, d_end = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
-                df = df[(df["_created_dt"] >= d_start) & (df["_created_dt"] <= d_end + pd.Timedelta(days=1))]
+    # ── Overview KPIs ────────────────────────────────────────────────────────
+    st.markdown("### Overview")
+    kpi = con.execute(f"""
+        SELECT
+            COUNT(*)                                                         AS total_tickets,
+            COUNT(*) FILTER (WHERE is_open)                                  AS open_tickets,
+            COUNT(*) FILTER (WHERE is_closed)                                AS closed_tickets,
+            ROUND(AVG(resolution_hours) FILTER (WHERE is_closed), 1)        AS avg_resolution_h,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE is_sla_breach = TRUE)
+                      / NULLIF(COUNT(*) FILTER (WHERE is_closed), 0), 1)    AS sla_breach_rate_pct
+        FROM marts.mart_ticket_kpis {w}
+    """).fetchone()
 
-    if has_team_col and sel_team != "All":
-        df = df[df["assigned_team"] == sel_team]
-    if sel_sev != "All" and "severity" in df.columns:
-        df = df[df["severity"] == sel_sev]
+    total, open_cnt, closed_cnt, avg_h, sla_pct = kpi
+    total = total or 0
 
-    if df.empty:
+    if total == 0:
         st.warning("No tickets match the selected filters.")
+        con.close()
         return
 
-    # ── Derived columns ───────────────────────────────────────────────────────
-    df["_is_open"] = ~df.get("status", pd.Series(dtype=str)).isin(["Resolved", "Closed"])
-    df["_is_escalated"] = df.get("status", pd.Series(dtype=str)) == "Escalated"
-    df["_sla_breach"] = df.apply(lambda r: _compute_sla_breach(r, now), axis=1)
-
-    has_ttc = "time_to_close_seconds" in df.columns
-    closed = df[~df["_is_open"]]
-    if has_ttc and not closed.empty:
-        ttc_numeric = pd.to_numeric(closed["time_to_close_seconds"], errors="coerce").dropna()
-        avg_resolution_h = ttc_numeric.mean() / 3600 if not ttc_numeric.empty else None
-    else:
-        avg_resolution_h = None
-
-    total = len(df)
-    open_count = int(df["_is_open"].sum())
-    escalated_pct = df["_is_escalated"].mean() * 100
-    sla_breach_pct = df["_sla_breach"].mean() * 100
-
-    # ── Section 1: Top KPIs ───────────────────────────────────────────────────
-    st.markdown("### Overview")
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total Tickets", f"{total:,}")
-    m2.metric("Open Tickets", f"{open_count:,}", delta=f"{open_count/total*100:.1f}% of total")
-    m3.metric(
-        "Avg Resolution Time",
-        f"{avg_resolution_h:.1f}h" if avg_resolution_h is not None else "—",
-    )
-    m4.metric("SLA Breach Rate", f"{sla_breach_pct:.1f}%")
-    m5.metric("Escalation Rate", f"{escalated_pct:.1f}%")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Tickets",      f"{total:,}")
+    m2.metric("Open Tickets",       f"{open_cnt:,}",
+              delta=f"{open_cnt / total * 100:.1f}% of total")
+    m3.metric("Avg Resolution Time",
+              f"{avg_h:.1f}h" if avg_h is not None else "—")
+    m4.metric("SLA Breach Rate",
+              f"{sla_pct:.1f}%" if sla_pct is not None else "—")
 
     st.markdown("---")
 
-    # ── Section 2: Volume trend + forecast  |  Severity distribution ─────────
-    st.markdown("### Volume & Severity")
-    col_trend, col_sev = st.columns([3, 2])
+    # ── Tabs: Volume | Teams | Dealers | Products ────────────────────────────
+    tab_vol, tab_team, tab_dealer, tab_product = st.tabs(
+        ["📈 Volume & Severity", "👥 Teams", "🏢 Dealers", "🔧 Products"]
+    )
 
-    with col_trend:
-        if df["_created_dt"].notna().any():
-            trend_df = df.dropna(subset=["_created_dt"]).copy()
-            trend_df["week"] = trend_df["_created_dt"].dt.to_period("W").apply(lambda r: r.start_time)
-            weekly = trend_df.groupby("week").size().reset_index(name="count").sort_values("week")
+    # ── Tab 1: Volume & Severity ─────────────────────────────────────────────
+    with tab_vol:
+        col_trend, col_sev = st.columns([3, 2])
 
-            # Simple linear forecast for next 4 weeks
-            import numpy as np
-            x = np.arange(len(weekly))
-            if len(x) >= 3:
-                coeffs = np.polyfit(x, weekly["count"].values, 1)
-                forecast_x = np.arange(len(weekly), len(weekly) + 4)
-                forecast_vals = np.polyval(coeffs, forecast_x).clip(0)
-                last_date = weekly["week"].iloc[-1]
-                forecast_dates = [last_date + pd.Timedelta(weeks=i + 1) for i in range(4)]
-                forecast_df = pd.DataFrame({"week": forecast_dates, "count": forecast_vals, "type": "Forecast"})
-                weekly["type"] = "Actual"
-                combined = pd.concat([weekly, forecast_df], ignore_index=True)
-                fig_trend = px.bar(
-                    combined[combined["type"] == "Actual"], x="week", y="count",
-                    title="Weekly ticket volume + 4-week forecast",
-                    labels={"count": "Tickets", "week": ""},
-                    color_discrete_sequence=["#4C78A8"],
-                )
-                fig_trend.add_scatter(
-                    x=forecast_df["week"], y=forecast_df["count"],
-                    mode="lines+markers", name="Forecast",
-                    line=dict(dash="dash", color="#E45756"),
-                )
-            else:
-                fig_trend = px.bar(weekly, x="week", y="count", title="Weekly ticket volume")
-            st.plotly_chart(fig_trend, use_container_width=True)
-        else:
-            st.info("No date data available for trend chart.")
+        with col_trend:
+            weekly = con.execute(f"""
+                SELECT
+                    DATE_TRUNC('week', created_date)::DATE AS week,
+                    COUNT(*) AS count
+                FROM marts.mart_ticket_kpis {w}
+                GROUP BY 1 ORDER BY 1
+            """).df()
 
-    with col_sev:
-        if "severity" in df.columns:
-            sev_counts = df["severity"].value_counts().reset_index()
-            sev_counts.columns = ["severity", "count"]
+            if not weekly.empty:
+                import numpy as np
+                x = np.arange(len(weekly))
+                if len(x) >= 3:
+                    coeffs = np.polyfit(x, weekly["count"].values, 1)
+                    forecast_vals = np.polyval(coeffs, np.arange(len(weekly), len(weekly) + 4)).clip(0)
+                    last_date = pd.Timestamp(weekly["week"].iloc[-1])
+                    forecast_df = pd.DataFrame({
+                        "week":  [last_date + pd.Timedelta(weeks=i + 1) for i in range(4)],
+                        "count": forecast_vals,
+                    })
+                    fig_trend = px.bar(
+                        weekly, x="week", y="count",
+                        title="Weekly ticket volume + 4-week forecast",
+                        labels={"count": "Tickets", "week": ""},
+                        color_discrete_sequence=["#4C78A8"],
+                    )
+                    fig_trend.add_scatter(
+                        x=forecast_df["week"], y=forecast_df["count"],
+                        mode="lines+markers", name="Forecast",
+                        line=dict(dash="dash", color="#E45756"),
+                    )
+                else:
+                    fig_trend = px.bar(weekly, x="week", y="count", title="Weekly ticket volume")
+                st.plotly_chart(fig_trend, use_container_width=True)
+
+        with col_sev:
+            sev_df = con.execute(f"""
+                SELECT severity_level AS severity, COUNT(*) AS count
+                FROM marts.mart_ticket_kpis {w}
+                GROUP BY 1 ORDER BY 2 DESC
+            """).df()
             color_map = {"Critical": "#E45756", "High": "#F58518", "Medium": "#EECA3B", "Low": "#72B7B2"}
             fig_sev = px.pie(
-                sev_counts, names="severity", values="count",
+                sev_df, names="severity", values="count",
                 title="Severity distribution", hole=0.45,
                 color="severity", color_discrete_map=color_map,
             )
             fig_sev.update_traces(textposition="inside", textinfo="percent+label")
             st.plotly_chart(fig_sev, use_container_width=True)
-        else:
-            st.info("No severity column in dataset.")
 
-    st.markdown("---")
-
-    # ── Section 3: Team performance bar  |  Status distribution ─────────────
-    st.markdown("### Team Performance")
-    col_team, col_status = st.columns(2)
-
-    with col_team:
-        if not has_team_col:
-            st.info("Team performance charts require an 'assigned_team' column.")
-        elif has_ttc and not closed.empty:
-            team_res = (
-                closed.assign(ttc_h=pd.to_numeric(closed["time_to_close_seconds"], errors="coerce") / 3600)
-                .groupby("assigned_team")["ttc_h"]
-                .mean()
-                .dropna()
-                .sort_values()
-                .reset_index()
-            )
-            team_res.columns = ["team", "avg_resolution_h"]
-            fig_res = px.bar(
-                team_res, x="avg_resolution_h", y="team", orientation="h",
-                title="Avg resolution time per team (hours)",
-                labels={"avg_resolution_h": "Hours", "team": ""},
-                color="avg_resolution_h",
-                color_continuous_scale="RdYlGn_r",
-            )
-            fig_res.update_coloraxes(showscale=False)
-            st.plotly_chart(fig_res, use_container_width=True)
-        else:
-            team_counts = df["assigned_team"].value_counts().reset_index()
-            team_counts.columns = ["team", "count"]
-            fig_tc = px.bar(team_counts, x="team", y="count", title="Tickets per team")
-            st.plotly_chart(fig_tc, use_container_width=True)
-
-    with col_status:
-        if "status" in df.columns:
-            status_counts = df["status"].value_counts().reset_index()
-            status_counts.columns = ["status", "count"]
-            fig_status = px.bar(
-                status_counts, x="status", y="count",
-                title="Ticket status distribution",
-                labels={"count": "Tickets", "status": ""},
-                color="status",
-            )
-            st.plotly_chart(fig_status, use_container_width=True)
-        else:
-            st.info("No status column in dataset.")
-
-    st.markdown("---")
-
-    # ── Section 4: Team summary table ─────────────────────────────────────────
-    st.markdown("### Team Summary Table")
-    team_stats_rows = []
-    if not has_team_col:
-        st.info("Team summary table requires an 'assigned_team' column.")
-    for team, grp in (df.groupby("assigned_team") if has_team_col else []):
-        t_total = len(grp)
-        t_open = int(grp["_is_open"].sum())
-        t_sla = f"{grp['_sla_breach'].mean() * 100:.1f}%"
-        t_esc = f"{grp['_is_escalated'].mean() * 100:.1f}%"
-        if has_ttc:
-            ttc_h = pd.to_numeric(grp.loc[~grp["_is_open"], "time_to_close_seconds"], errors="coerce") / 3600
-            avg_h = f"{ttc_h.mean():.1f}h" if not ttc_h.dropna().empty else "—"
-        else:
-            avg_h = "—"
-        team_stats_rows.append({
-            "Team": team,
-            "Total": t_total,
-            "Open": t_open,
-            "Avg Resolution": avg_h,
-            "SLA Breach": t_sla,
-            "Escalation": t_esc,
-        })
-    if team_stats_rows:
-        st.dataframe(
-            pd.DataFrame(team_stats_rows).sort_values("Total", ascending=False),
-            use_container_width=True,
-            hide_index=True,
+        # Resolution bucket distribution
+        bucket_df = con.execute(f"""
+            SELECT resolution_bucket, COUNT(*) AS count
+            FROM marts.mart_ticket_kpis {w}
+            GROUP BY 1
+            ORDER BY CASE resolution_bucket
+                WHEN 'Open'     THEN 0 WHEN '0–4h'    THEN 1
+                WHEN '4–24h'    THEN 2 WHEN '24–72h'  THEN 3
+                WHEN '3–7 days' THEN 4 ELSE 5 END
+        """).df()
+        fig_bucket = px.bar(
+            bucket_df, x="resolution_bucket", y="count",
+            title="Resolution time distribution",
+            labels={"count": "Tickets", "resolution_bucket": "Time to close"},
+            color_discrete_sequence=["#4C78A8"],
         )
+        st.plotly_chart(fig_bucket, use_container_width=True)
 
-    st.markdown("---")
+    # ── Tab 2: Teams ─────────────────────────────────────────────────────────
+    with tab_team:
+        # Aggregate across all months for the filtered period
+        team_w_parts = [p for p in where if "assigned_team" not in p]
+        team_w = ("WHERE " + " AND ".join(team_w_parts)) if team_w_parts else ""
 
-    # ── Section 5: Failure modes  |  Channel breakdown ────────────────────────
-    st.markdown("### Operational Breakdown")
-    col_fail, col_chan = st.columns(2)
+        team_df = con.execute(f"""
+            SELECT
+                assigned_team                                               AS "Team",
+                SUM(total_tickets)                                          AS "Total",
+                SUM(open_tickets)                                           AS "Open",
+                ROUND(
+                    SUM(avg_resolution_hours * closed_tickets)
+                    / NULLIF(SUM(closed_tickets), 0), 1)                   AS "Avg Resolution (h)",
+                ROUND(
+                    100.0 * SUM(sla_breached_tickets)
+                          / NULLIF(SUM(closed_tickets), 0), 1)             AS "SLA Breach %",
+                ROUND(AVG(critical_pct), 1)                                AS "Critical %"
+            FROM marts.mart_team_workload {team_w}
+            GROUP BY 1
+            ORDER BY 2 DESC
+        """).df()
 
-    with col_fail:
-        fm_col = next((c for c in ["failure_mode", "component", "sr_area"] if c in df.columns), None)
-        if fm_col:
-            fm_counts = df[fm_col].value_counts().head(10).reset_index()
-            fm_counts.columns = [fm_col, "count"]
+        col_bar, col_tbl = st.columns([1, 1])
+
+        with col_bar:
+            fig_team = px.bar(
+                team_df.sort_values("Avg Resolution (h)"),
+                x="Avg Resolution (h)", y="Team", orientation="h",
+                title="Avg resolution time per team (hours)",
+                color="Avg Resolution (h)", color_continuous_scale="RdYlGn_r",
+            )
+            fig_team.update_coloraxes(showscale=False)
+            st.plotly_chart(fig_team, use_container_width=True)
+
+        with col_tbl:
+            fig_sla = px.bar(
+                team_df.sort_values("SLA Breach %", ascending=False),
+                x="Team", y="SLA Breach %",
+                title="SLA breach rate by team (%)",
+                color="SLA Breach %", color_continuous_scale="Reds",
+            )
+            fig_sla.update_coloraxes(showscale=False)
+            st.plotly_chart(fig_sla, use_container_width=True)
+
+        st.dataframe(team_df, use_container_width=True, hide_index=True)
+
+    # ── Tab 3: Dealers ───────────────────────────────────────────────────────
+    with tab_dealer:
+        dealer_df = con.execute(f"""
+            SELECT
+                dealer_label                                                AS "Dealer",
+                dealer_country                                              AS "Country",
+                SUM(total_tickets)                                          AS "Total Tickets",
+                SUM(distinct_vehicles)                                      AS "Vehicles",
+                ROUND(
+                    100.0 * SUM(sla_breached_tickets)
+                          / NULLIF(SUM(closed_tickets), 0), 1)             AS "SLA Breach %",
+                ROUND(
+                    SUM(avg_resolution_hours * closed_tickets)
+                    / NULLIF(SUM(closed_tickets), 0), 1)                   AS "Avg Resolution (h)",
+                ROUND(AVG(warranty_rate_pct), 1)                           AS "Warranty %"
+            FROM marts.mart_dealer_performance
+            {("WHERE " + " AND ".join([p for p in where if "assigned_team" not in p])) if [p for p in where if "assigned_team" not in p] else ""}
+            GROUP BY 1, 2
+            ORDER BY 3 DESC
+            LIMIT 20
+        """).df()
+
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            fig_d_vol = px.bar(
+                dealer_df.head(10), x="Total Tickets", y="Dealer", orientation="h",
+                title="Top 10 dealers by ticket volume",
+                color_discrete_sequence=["#4C78A8"],
+            )
+            st.plotly_chart(fig_d_vol, use_container_width=True)
+        with col_d2:
+            fig_d_sla = px.bar(
+                dealer_df.sort_values("SLA Breach %", ascending=False).head(10),
+                x="SLA Breach %", y="Dealer", orientation="h",
+                title="Top 10 dealers by SLA breach rate",
+                color="SLA Breach %", color_continuous_scale="Reds",
+            )
+            fig_d_sla.update_coloraxes(showscale=False)
+            st.plotly_chart(fig_d_sla, use_container_width=True)
+
+        st.dataframe(dealer_df, use_container_width=True, hide_index=True)
+
+    # ── Tab 4: Products ──────────────────────────────────────────────────────
+    with tab_product:
+        prod_df = con.execute("""
+            SELECT
+                product_family          AS "Product Family",
+                component_name          AS "Component",
+                fault_mode              AS "Fault Mode",
+                total_tickets           AS "Tickets",
+                affected_vehicles       AS "Vehicles",
+                critical_rate_pct       AS "Critical %",
+                warranty_rate_pct       AS "Warranty %",
+                avg_resolution_hours    AS "Avg Resolution (h)"
+            FROM marts.mart_product_defects
+            ORDER BY total_tickets DESC
+            LIMIT 30
+        """).df()
+
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            pf_summary = con.execute("""
+                SELECT product_family, SUM(total_tickets) AS tickets
+                FROM marts.mart_product_defects
+                GROUP BY 1 ORDER BY 2 DESC LIMIT 8
+            """).df()
+            fig_pf = px.bar(
+                pf_summary, x="tickets", y="product_family", orientation="h",
+                title="Tickets by product family",
+                labels={"tickets": "Tickets", "product_family": ""},
+                color_discrete_sequence=["#4C78A8"],
+            )
+            st.plotly_chart(fig_pf, use_container_width=True)
+        with col_p2:
+            fm_summary = con.execute("""
+                SELECT fault_mode, SUM(total_tickets) AS tickets
+                FROM marts.mart_product_defects
+                WHERE fault_mode IS NOT NULL
+                GROUP BY 1 ORDER BY 2 DESC LIMIT 8
+            """).df()
             fig_fm = px.bar(
-                fm_counts, x="count", y=fm_col, orientation="h",
-                title=f"Top 10 — {fm_col.replace('_', ' ').title()}",
-                labels={"count": "Tickets", fm_col: ""},
+                fm_summary, x="tickets", y="fault_mode", orientation="h",
+                title="Tickets by fault mode",
+                labels={"tickets": "Tickets", "fault_mode": ""},
+                color_discrete_sequence=["#F58518"],
             )
             st.plotly_chart(fig_fm, use_container_width=True)
 
-    with col_chan:
-        if "ticket_channel" in df.columns:
-            ch_counts = df["ticket_channel"].value_counts().reset_index()
-            ch_counts.columns = ["channel", "count"]
-            fig_ch = px.pie(
-                ch_counts, names="channel", values="count",
-                title="Tickets by channel", hole=0.4,
-            )
-            st.plotly_chart(fig_ch, use_container_width=True)
-        elif "region" in df.columns:
-            reg_counts = df["region"].value_counts().reset_index()
-            reg_counts.columns = ["region", "count"]
-            fig_reg = px.bar(reg_counts, x="region", y="count", title="Tickets by region")
-            st.plotly_chart(fig_reg, use_container_width=True)
+        st.dataframe(prod_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
     # ── Export ────────────────────────────────────────────────────────────────
     st.markdown("### Export")
+    raw_df = con.execute(f"SELECT * FROM marts.mart_ticket_kpis {w} LIMIT 5000").df()
+    con.close()
+
     output = io.BytesIO()
     summary_data = {
-        "Metric": ["Total Tickets", "Open Tickets", "Avg Resolution Time", "SLA Breach Rate", "Escalation Rate"],
+        "Metric": ["Total Tickets", "Open Tickets", "Closed Tickets",
+                   "Avg Resolution Time", "SLA Breach Rate"],
         "Value": [
-            total,
-            open_count,
-            f"{avg_resolution_h:.1f}h" if avg_resolution_h is not None else "—",
-            f"{sla_breach_pct:.1f}%",
-            f"{escalated_pct:.1f}%",
+            total, open_cnt, closed_cnt,
+            f"{avg_h:.1f}h" if avg_h is not None else "—",
+            f"{sla_pct:.1f}%" if sla_pct is not None else "—",
         ],
     }
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary", index=False)
-        if team_stats_rows:
-            pd.DataFrame(team_stats_rows).to_excel(writer, sheet_name="Team Stats", index=False)
-        df.drop(columns=[c for c in df.columns if c.startswith("_")], errors="ignore").head(5000).to_excel(
-            writer, sheet_name="Raw Data", index=False
-        )
+        raw_df.to_excel(writer, sheet_name="Ticket Detail", index=False)
     output.seek(0)
     st.download_button(
         label="Download KPI Report (Excel)",

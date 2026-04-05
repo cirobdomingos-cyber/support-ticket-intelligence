@@ -91,6 +91,7 @@ def test_generate_dataset_passes_training_mapping_options(client):
     assert r.status_code == 200
     assert r.json()["row_count"] == 123
     mock_generate.assert_called_once_with(
+        size=50000,
         include_columns=["ticket_uuid", "issue_description", "route_team"],
         description_column="issue_description",
         assigned_team_column="",

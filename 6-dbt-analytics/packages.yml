@@ -1,0 +1,12 @@
+packages:
+  # dbt-utils: the standard library of dbt — surrogate keys, date spines,
+  # pivot macros, and generic tests. Every production dbt project uses this.
+  - package: dbt-labs/dbt_utils
+    version: [">=1.0.0", "<2.0.0"]
+
+  # dbt-expectations: port of Great Expectations into dbt tests.
+  # Adds statistical tests like expect_column_mean_to_be_between,
+  # expect_column_values_to_match_regex, etc.
+  # Portfolio signal: shows familiarity with data quality frameworks.
+  - package: calogica/dbt_expectations
+    version: [">=0.10.0", "<1.0.0"]

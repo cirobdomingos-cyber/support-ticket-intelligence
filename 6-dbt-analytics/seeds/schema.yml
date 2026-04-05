@@ -1,0 +1,49 @@
+version: 2
+
+seeds:
+  - name: support_tickets
+    description: >
+      Raw synthetic support ticket dataset simulating a global OEM technical support
+      operation. Contains 50,000 tickets across vehicle platforms, dealer networks,
+      fault codes, and resolution timelines. Generated to mirror real-world Volvo-style
+      field support data.
+
+      In a production environment this data would be loaded by an ingestion tool
+      (Fivetran, Airbyte) into a raw schema. The seed simulates that raw layer for
+      local development.
+
+    columns:
+      - name: ticket_id
+        description: "Unique UUID identifier for the support ticket."
+        tests:
+          - unique
+          - not_null
+
+      - name: created_timestamp
+        description: "UTC timestamp when the ticket was opened."
+        tests:
+          - not_null
+
+      - name: ticket_status
+        description: "Current lifecycle state of the ticket."
+        tests:
+          - accepted_values:
+              values: ['Open', 'Closed']
+
+      - name: severity_level
+        description: "Severity classification assigned at ticket creation."
+        tests:
+          - accepted_values:
+              values: ['Low', 'Medium', 'High', 'Critical']
+
+      - name: customer_segment
+        description: "Type of customer who reported the ticket."
+        tests:
+          - accepted_values:
+              values: ['Dealer', 'Fleet Operator', 'Independent Owner']
+
+      - name: odometer_unit
+        description: "Unit of the odometer reading (km or miles)."
+        tests:
+          - accepted_values:
+              values: ['km', 'miles']
