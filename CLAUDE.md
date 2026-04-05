@@ -55,7 +55,7 @@ $env:API_URL = "http://localhost:8000"
 ## Environment Variables
 - `API_URL` — API base URL (default: http://localhost:8000)
 - `HUGGINGFACEHUB_API_TOKEN` — HuggingFace token for AI suggestions (optional; falls back to local draft without it)
-- `HUGGINGFACE_REPO_ID` — LLM model ID (default: Qwen/Qwen2.5-7B-Instruct-1M)
+- `HUGGINGFACE_REPO_ID` — LLM model ID (default: Qwen/Qwen2.5-7B-Instruct)
 - `DUCKDB_PATH` — path to DuckDB file for analytics layer (module 6)
 
 ## Deploy (Railway)

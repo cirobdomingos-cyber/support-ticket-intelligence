@@ -1,0 +1,67 @@
+name: 'support_analytics'
+version: '1.0.0'
+config-version: 2
+
+profile: 'support_analytics'
+
+# Path configuration — dbt defaults, kept explicit for clarity
+model-paths:    ["models"]
+analysis-paths: ["analyses"]
+test-paths:     ["tests"]
+seed-paths:     ["seeds"]
+macro-paths:    ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path:  "target"
+clean-targets: ["target", "dbt_packages"]
+
+# ---------------------------------------------------------------------------
+# Model configuration
+#
+# Design decisions:
+#   staging      → VIEW   : cheap to recompute, no storage cost, always fresh
+#   intermediate → VIEW   : business logic layer, rebuilt on demand
+#   marts        → TABLE  : pre-aggregated for BI tools, pays the compute once
+#
+# Schema-per-layer keeps the DuckDB namespace clean and mirrors how production
+# warehouses (Snowflake, BigQuery) separate raw from curated data.
+# ---------------------------------------------------------------------------
+models:
+  support_analytics:
+    staging:
+      +materialized: view
+      +schema: staging
+
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+
+    marts:
+      +materialized: table
+      +schema: marts
+
+# ---------------------------------------------------------------------------
+# SLA thresholds (hours) — single source of truth for SLA breach logic.
+# Change here and rebuild; the intermediate model picks up the new values.
+# ---------------------------------------------------------------------------
+vars:
+  sla_hours:
+    Critical: 24
+    High:     48
+    Medium:   72
+    Low:      96
+
+# Seed configuration — raw CSV loaded via `dbt seed`
+seeds:
+  support_analytics:
+    support_tickets:
+      +schema: raw
+      +column_types:
+        ticket_id:          varchar
+        created_timestamp:  varchar
+        closed_timestamp:   varchar
+        created_date:       varchar
+        closed_date:        varchar
+        resolution_seconds: double
+        first_queue_seconds: integer
+        odometer_reading:   double

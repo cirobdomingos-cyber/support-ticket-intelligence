@@ -1,0 +1,90 @@
+version: 2
+
+models:
+  - name: stg_support_tickets
+    description: >
+      Cleaned and typed view of the raw support ticket seed. One row per ticket.
+      All columns are explicitly renamed and cast. Odometer readings are
+      normalised to kilometres. No business logic or derived fields.
+
+    columns:
+      - name: ticket_id
+        description: "UUID primary key for the support ticket."
+        tests:
+          - unique
+          - not_null
+
+      - name: vehicle_chassis_id
+        description: "Internal chassis identifier (e.g. CH377247)."
+        tests:
+          - not_null
+
+      - name: vehicle_vin
+        description: "17-character Vehicle Identification Number."
+
+      - name: chassis_series
+        description: "Vehicle platform series (e.g. S-610, S-983)."
+
+      - name: product_family
+        description: "High-level product grouping (e.g. Brake System, Engine Control Module)."
+        tests:
+          - not_null
+
+      - name: component_name
+        description: "Specific component involved in the ticket (e.g. Brake Pads, Fuel Injector)."
+
+      - name: fault_code
+        description: "Structured fault code from the vehicle diagnostic system."
+
+      - name: fault_mode
+        description: "Category of failure (e.g. Leak, Short Circuit, Noise)."
+
+      - name: ticket_status
+        description: "Current lifecycle status."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['New', 'Assigned', 'In Progress', 'Awaiting Parts', 'Escalated', 'Resolved', 'Closed']
+
+      - name: severity_level
+        description: "Severity at ticket creation — drives SLA thresholds downstream."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Low', 'Medium', 'High', 'Critical']
+
+      - name: assigned_team
+        description: "Team currently responsible for the ticket."
+        tests:
+          - not_null
+
+      - name: dealer_code
+        description: "Unique dealer identifier."
+
+      - name: dealer_country
+        description: "ISO country code of the dealer."
+
+      - name: created_at
+        description: "UTC timestamp of ticket creation."
+        tests:
+          - not_null
+
+      - name: created_date
+        description: "Calendar date of ticket creation (date part of created_at)."
+        tests:
+          - not_null
+
+      - name: closed_at
+        description: "UTC timestamp of ticket closure. Null for open tickets."
+
+      - name: closed_date
+        description: "Calendar date of ticket closure. Null for open tickets."
+
+      - name: resolution_seconds
+        description: "Total seconds from creation to close. Null for open tickets."
+
+      - name: first_queue_seconds
+        description: "Seconds from ticket creation to first team assignment."
+
+      - name: odometer_km
+        description: "Vehicle odometer reading in kilometres (miles converted at 1.60934 ratio)."

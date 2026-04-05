@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# Dockerfile.dashboard — multi-stage build
+# Build context: repo root (one level above 5-support-ticket-dashboard/)
+#
+# Stage 1 (dbt-builder): runs dbt build, outputs dev.duckdb
+# Stage 2 (dashboard):   copies dev.duckdb + runs Streamlit
+#
+# Why multi-stage?
+#   - dbt + its deps (~400 MB) are not needed at runtime
+#   - Only the 5 MB DuckDB artifact travels to the final image
+#   - Final image is lean: ~250 MB vs ~650 MB single-stage
+#
+# Railway deployment: set rootDirectory to "/" and Dockerfile to
+# "Dockerfile.dashboard" in the railway.json for the dashboard service.
+# ---------------------------------------------------------------------------
+
+# ── Stage 1: build dbt analytics layer ─────────────────────────────────────
+FROM python:3.12-slim AS dbt-builder
+
+WORKDIR /analytics
+
+RUN pip install --no-cache-dir dbt-duckdb>=1.9.0
+
+COPY 6-dbt-analytics/packages.yml     packages.yml
+COPY 6-dbt-analytics/dbt_project.yml  dbt_project.yml
+COPY 6-dbt-analytics/profiles.yml     profiles.yml
+COPY 6-dbt-analytics/macros/          macros/
+COPY 6-dbt-analytics/models/          models/
+COPY 6-dbt-analytics/tests/           tests/
+COPY 6-dbt-analytics/analyses/        analyses/
+COPY 6-dbt-analytics/seeds/           seeds/
+
+RUN dbt deps --profiles-dir . \
+ && dbt build --profiles-dir .
+
+# Output: /analytics/dev.duckdb
+
+# ── Stage 2: Streamlit dashboard ───────────────────────────────────────────
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY 5-support-ticket-dashboard/requirements.txt requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY 5-support-ticket-dashboard/ .
+
+# Copy the pre-built DuckDB file from stage 1
+COPY --from=dbt-builder /analytics/dev.duckdb /app/dev.duckdb
+
+# Tell the dashboard where to find the analytics database
+ENV DUCKDB_PATH=/app/dev.duckdb
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "app.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true"]
