@@ -27,7 +27,7 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ['Open', 'Closed']
+              values: ['New', 'Assigned', 'In Progress', 'Awaiting Parts', 'Escalated', 'Resolved', 'Closed']
 
       - name: is_sla_breach
         description: "True when ticket exceeded its severity SLA threshold."
@@ -37,7 +37,6 @@ models:
         tests:
           - dbt_expectations.expect_column_values_to_be_between:
               min_value: 0
-              mostly: 0.99
 
       - name: created_date
         description: "Calendar date the ticket was created."

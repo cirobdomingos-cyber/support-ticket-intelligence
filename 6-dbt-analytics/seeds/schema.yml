@@ -28,7 +28,7 @@ seeds:
         description: "Current lifecycle state of the ticket."
         tests:
           - accepted_values:
-              values: ['Open', 'Closed']
+              values: ['New', 'Assigned', 'In Progress', 'Awaiting Parts', 'Escalated', 'Resolved', 'Closed']
 
       - name: severity_level
         description: "Severity classification assigned at ticket creation."
@@ -40,7 +40,7 @@ seeds:
         description: "Type of customer who reported the ticket."
         tests:
           - accepted_values:
-              values: ['Dealer', 'Fleet Operator', 'Independent Owner']
+              values: ['Dealer', 'Fleet Operator', 'Independent Owner', 'Service Partner']
 
       - name: odometer_unit
         description: "Unit of the odometer reading (km or miles)."

@@ -44,7 +44,7 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ['Open', 'Closed']
+              values: ['New', 'Assigned', 'In Progress', 'Awaiting Parts', 'Escalated', 'Resolved', 'Closed']
 
       - name: severity_level
         description: "Severity at ticket creation — drives SLA thresholds downstream."

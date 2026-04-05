@@ -29,6 +29,7 @@ class SearchResult(BaseModel):
 
 class SuggestRequest(BaseModel):
     description: str = Field(..., description="Ticket description for AI response suggestion")
+    hf_token: str | None = Field(None, description="Optional HuggingFace API token; overrides the server env var for this request")
 
 
 class SuggestResponse(BaseModel):

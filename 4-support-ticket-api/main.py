@@ -147,7 +147,7 @@ async def suggest_ticket_response(request: SuggestRequest) -> SuggestResponse:
                 detail="Semantic search resources are not loaded yet",
             )
     try:
-        suggestion = services.suggest_response(request.description)
+        suggestion = services.suggest_response(request.description, hf_token=request.hf_token)
         return SuggestResponse(**suggestion)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

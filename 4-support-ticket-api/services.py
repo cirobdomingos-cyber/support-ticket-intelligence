@@ -1310,18 +1310,18 @@ class _HFInferenceClientWrapper:
             ) from exc
 
 
-def _create_llm_client() -> tuple[Any | None, bool, str | None]:
-    hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN", "").strip()
-    if not hf_token:
+def _create_llm_client(hf_token: str | None = None) -> tuple[Any | None, bool, str | None]:
+    token = (hf_token or "").strip() or os.getenv("HUGGINGFACEHUB_API_TOKEN", "").strip()
+    if not token:
         return None, False, "HUGGINGFACEHUB_API_TOKEN is not configured"
 
-    provider = os.getenv("HUGGINGFACE_PROVIDER", "hf-inference").strip() or "hf-inference"
-    repo_id = os.getenv("HUGGINGFACE_REPO_ID", "Qwen/Qwen2.5-7B-Instruct-1M").strip() or "Qwen/Qwen2.5-7B-Instruct-1M"
+    provider = os.getenv("HUGGINGFACE_PROVIDER", "auto").strip() or "auto"
+    repo_id = os.getenv("HUGGINGFACE_REPO_ID", "Qwen/Qwen2.5-7B-Instruct").strip() or "Qwen/Qwen2.5-7B-Instruct"
 
     # Use a single explicit inference path so provider/model behavior is deterministic.
     try:
         from huggingface_hub import InferenceClient
-        client = InferenceClient(provider=provider, api_key=hf_token)
+        client = InferenceClient(provider=provider, api_key=token)
         return _HFInferenceClientWrapper(client, repo_id), True, None
     except Exception as exc:
         return None, False, f"Failed to initialize HuggingFace InferenceClient for provider '{provider}': {exc}"
@@ -1370,13 +1370,13 @@ def _build_local_response_draft(ticket_description: str, context_tickets: list[d
     )
 
 
-def suggest_response(ticket_description: str) -> dict[str, Any]:
+def suggest_response(ticket_description: str, hf_token: str | None = None) -> dict[str, Any]:
     description = (ticket_description or "").strip()
     if not description:
         raise ValueError("Ticket description must not be empty")
 
     context_tickets = search_similar_tickets(description, top_k=3)
-    llm, llm_available, unavailable_reason = _create_llm_client()
+    llm, llm_available, unavailable_reason = _create_llm_client(hf_token)
 
     if not llm_available or llm is None:
         local_draft = _build_local_response_draft(description, context_tickets)

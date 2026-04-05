@@ -5,6 +5,7 @@ import os
 from io import BytesIO
 from typing import Any
 
+import numpy as np
 import duckdb
 import pandas as pd
 import plotly.express as px
@@ -21,6 +22,8 @@ _DUCKDB_PATH = os.getenv(
     "DUCKDB_PATH",
     os.path.join(os.path.dirname(__file__), "dev.duckdb"),
 )
+FORECAST_WEEKS = 4
+
 NO_TEAM_COLUMN_OPTION = "(no team column - routing will be disabled)"
 AUTO_GENERATE_TICKET_ID_OPTION = "(auto-generate ticket_id)"
 
@@ -242,17 +245,20 @@ def call_model_performance() -> dict[str, Any]:
     return response.json()
 
 
-def call_suggest(description: str) -> dict[str, Any]:
+def call_suggest(description: str, hf_token: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"description": description}
+    if hf_token:
+        payload["hf_token"] = hf_token
     response = requests.post(
         f"{API_URL}/suggest",
-        json={"description": description},
+        json=payload,
         timeout=120,
     )
     response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict):
+    result = response.json()
+    if not isinstance(result, dict):
         raise ValueError("Unexpected suggestion payload")
-    return payload
+    return result
 
 
 def call_status() -> dict[str, Any]:
@@ -872,6 +878,36 @@ def show_ai_suggestions() -> None:
     st.header("AI Suggestions")
     st.caption("Generate AI-powered response suggestions for support tickets using semantic search context + LLM")
 
+    # ── Optional LLM token (session-scoped, never persisted) ─────────────────
+    with st.expander("⚙️ LLM Configuration", expanded="ai_hf_token" not in st.session_state):
+        st.markdown(
+            "Enter your [HuggingFace API token](https://huggingface.co/settings/tokens) to enable "
+            "live AI suggestions. The token is stored only for this browser session and is never saved."
+        )
+        token_input = st.text_input(
+            "HuggingFace API token",
+            value=st.session_state.get("ai_hf_token", ""),
+            type="password",
+            placeholder="hf_…",
+            key="ai_hf_token_input",
+        )
+        col_save, col_clear = st.columns([1, 1])
+        if col_save.button("Save token", type="primary"):
+            st.session_state["ai_hf_token"] = token_input.strip()
+            st.success("Token saved for this session." if token_input.strip() else "Token cleared.")
+            st.rerun()
+        if col_clear.button("Clear token"):
+            st.session_state.pop("ai_hf_token", None)
+            st.rerun()
+
+    active_token: str | None = st.session_state.get("ai_hf_token") or None
+    if active_token:
+        st.success("LLM token configured — live AI suggestions enabled.", icon="✅")
+    else:
+        st.info("No token set — responses will use the local draft fallback.", icon="ℹ️")
+
+    st.divider()
+
     description = st.text_area(
         "Describe the support ticket",
         height=180,
@@ -886,7 +922,7 @@ def show_ai_suggestions() -> None:
 
         with st.spinner("Generating AI response suggestion..."):
             try:
-                payload = call_suggest(description.strip())
+                payload = call_suggest(description.strip(), hf_token=active_token)
                 llm_available = bool(payload.get("llm_available", False))
                 suggested_response = str(payload.get("suggested_response", "")).strip()
                 context_tickets = payload.get("context_tickets", [])
@@ -899,7 +935,7 @@ def show_ai_suggestions() -> None:
                 else:
                     fallback_reason = str(llm_error or "Using local fallback draft")
                     if "not configured" in fallback_reason.lower():
-                        st.info("Running local draft mode (no external LLM token configured).")
+                        st.info("Running local draft mode (no LLM token configured).")
                     else:
                         st.warning(
                             "External LLM unavailable. Showing local fallback draft instead. "
@@ -993,15 +1029,32 @@ def show_kpi_analytics() -> None:
             "Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d
         )
 
-    # Build WHERE clauses — filter values come from the DB so no injection risk
-    where: list[str] = []
+    # Build parameterized filter clauses.
+    # Each entry: (sql_fragment_with_placeholders, [values]).
+    # Using ? placeholders keeps values out of the query string entirely.
+    filters: list[tuple[str, list]] = []
     if sel_team != "All":
-        where.append(f"assigned_team = '{sel_team}'")
+        filters.append(("assigned_team = ?", [sel_team]))
     if sel_sev != "All":
-        where.append(f"severity_level = '{sel_sev}'")
+        filters.append(("severity_level = ?", [sel_sev]))
     if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-        where.append(f"created_date BETWEEN DATE '{date_range[0]}' AND DATE '{date_range[1]}'")
-    w = ("WHERE " + " AND ".join(where)) if where else ""
+        filters.append(("created_date BETWEEN ? AND ?", [str(date_range[0]), str(date_range[1])]))
+
+    all_clauses  = [f[0] for f in filters]
+    all_params   = [p for f in filters for p in f[1]]
+    w            = ("WHERE " + " AND ".join(all_clauses)) if all_clauses else ""
+
+    # Filters without the team constraint — used by tabs that aggregate all teams.
+    no_team      = [(c, p) for c, p in filters if "assigned_team" not in c]
+    no_team_clauses = [f[0] for f in no_team]
+    no_team_params  = [p for f in no_team for p in f[1]]
+    team_w          = ("WHERE " + " AND ".join(no_team_clauses)) if no_team_clauses else ""
+
+    # Aggregated marts (team_workload, dealer_performance) group by created_month,
+    # not created_date. Build a parallel filter set with that substitution.
+    month_no_team_clauses = [c.replace("created_date", "created_month") for c in no_team_clauses]
+    month_w               = ("WHERE " + " AND ".join(month_no_team_clauses)) if month_no_team_clauses else ""
+    month_params          = no_team_params
 
     # ── Overview KPIs ────────────────────────────────────────────────────────
     st.markdown("### Overview")
@@ -1015,7 +1068,7 @@ def show_kpi_analytics() -> None:
                 100.0 * COUNT(*) FILTER (WHERE is_sla_breach = TRUE)
                       / NULLIF(COUNT(*) FILTER (WHERE is_closed), 0), 1)    AS sla_breach_rate_pct
         FROM marts.mart_ticket_kpis {w}
-    """).fetchone()
+    """, all_params).fetchone()
 
     total, open_cnt, closed_cnt, avg_h, sla_pct = kpi
     total = total or 0
@@ -1052,22 +1105,21 @@ def show_kpi_analytics() -> None:
                     COUNT(*) AS count
                 FROM marts.mart_ticket_kpis {w}
                 GROUP BY 1 ORDER BY 1
-            """).df()
+            """, all_params).df()
 
             if not weekly.empty:
-                import numpy as np
                 x = np.arange(len(weekly))
                 if len(x) >= 3:
                     coeffs = np.polyfit(x, weekly["count"].values, 1)
-                    forecast_vals = np.polyval(coeffs, np.arange(len(weekly), len(weekly) + 4)).clip(0)
+                    forecast_vals = np.polyval(coeffs, np.arange(len(weekly), len(weekly) + FORECAST_WEEKS)).clip(0)
                     last_date = pd.Timestamp(weekly["week"].iloc[-1])
                     forecast_df = pd.DataFrame({
-                        "week":  [last_date + pd.Timedelta(weeks=i + 1) for i in range(4)],
+                        "week":  [last_date + pd.Timedelta(weeks=i + 1) for i in range(FORECAST_WEEKS)],
                         "count": forecast_vals,
                     })
                     fig_trend = px.bar(
                         weekly, x="week", y="count",
-                        title="Weekly ticket volume + 4-week forecast",
+                        title=f"Weekly ticket volume + {FORECAST_WEEKS}-week forecast",
                         labels={"count": "Tickets", "week": ""},
                         color_discrete_sequence=["#4C78A8"],
                     )
@@ -1085,7 +1137,7 @@ def show_kpi_analytics() -> None:
                 SELECT severity_level AS severity, COUNT(*) AS count
                 FROM marts.mart_ticket_kpis {w}
                 GROUP BY 1 ORDER BY 2 DESC
-            """).df()
+            """, all_params).df()
             color_map = {"Critical": "#E45756", "High": "#F58518", "Medium": "#EECA3B", "Low": "#72B7B2"}
             fig_sev = px.pie(
                 sev_df, names="severity", values="count",
@@ -1104,7 +1156,7 @@ def show_kpi_analytics() -> None:
                 WHEN 'Open'     THEN 0 WHEN '0–4h'    THEN 1
                 WHEN '4–24h'    THEN 2 WHEN '24–72h'  THEN 3
                 WHEN '3–7 days' THEN 4 ELSE 5 END
-        """).df()
+        """, all_params).df()
         fig_bucket = px.bar(
             bucket_df, x="resolution_bucket", y="count",
             title="Resolution time distribution",
@@ -1115,10 +1167,6 @@ def show_kpi_analytics() -> None:
 
     # ── Tab 2: Teams ─────────────────────────────────────────────────────────
     with tab_team:
-        # Aggregate across all months for the filtered period
-        team_w_parts = [p for p in where if "assigned_team" not in p]
-        team_w = ("WHERE " + " AND ".join(team_w_parts)) if team_w_parts else ""
-
         team_df = con.execute(f"""
             SELECT
                 assigned_team                                               AS "Team",
@@ -1131,10 +1179,10 @@ def show_kpi_analytics() -> None:
                     100.0 * SUM(sla_breached_tickets)
                           / NULLIF(SUM(closed_tickets), 0), 1)             AS "SLA Breach %",
                 ROUND(AVG(critical_pct), 1)                                AS "Critical %"
-            FROM marts.mart_team_workload {team_w}
+            FROM marts.mart_team_workload {month_w}
             GROUP BY 1
             ORDER BY 2 DESC
-        """).df()
+        """, month_params).df()
 
         col_bar, col_tbl = st.columns([1, 1])
 
@@ -1176,11 +1224,11 @@ def show_kpi_analytics() -> None:
                     / NULLIF(SUM(closed_tickets), 0), 1)                   AS "Avg Resolution (h)",
                 ROUND(AVG(warranty_rate_pct), 1)                           AS "Warranty %"
             FROM marts.mart_dealer_performance
-            {("WHERE " + " AND ".join([p for p in where if "assigned_team" not in p])) if [p for p in where if "assigned_team" not in p] else ""}
+            {month_w}
             GROUP BY 1, 2
             ORDER BY 3 DESC
             LIMIT 20
-        """).df()
+        """, month_params).df()
 
         col_d1, col_d2 = st.columns(2)
         with col_d1:
@@ -1254,10 +1302,93 @@ def show_kpi_analytics() -> None:
 
     # ── Export ────────────────────────────────────────────────────────────────
     st.markdown("### Export")
-    raw_df = con.execute(f"SELECT * FROM marts.mart_ticket_kpis {w} LIMIT 5000").df()
+
+    # Use a stable cache key derived from the active filters so that changing
+    # filters invalidates any previously prepared export data.
+    export_cache_key = f"export__{w}__{all_params}__{month_w}__{month_params}"
+
+    if st.session_state.get("_export_cache_key") != export_cache_key:
+        # Filters changed — discard stale export data
+        st.session_state.pop("_export_dfs", None)
+
+    if "_export_dfs" not in st.session_state:
+        st.info("Click **Prepare export** to build the download files for the current filters.")
+        if st.button("Prepare export", type="primary"):
+            with st.spinner("Querying all marts…"):
+                raw_df = con.execute(
+                    f"SELECT * FROM marts.mart_ticket_kpis {w}", all_params
+                ).df()
+
+                export_team_df = con.execute(f"""
+                    SELECT
+                        assigned_team           AS "Team",
+                        created_month           AS "Month",
+                        total_tickets           AS "Total Tickets",
+                        open_tickets            AS "Open",
+                        closed_tickets          AS "Closed",
+                        sla_breached_tickets    AS "SLA Breached",
+                        sla_breach_rate_pct     AS "SLA Breach %",
+                        avg_resolution_hours    AS "Avg Resolution (h)",
+                        median_resolution_hours AS "Median Resolution (h)",
+                        critical_tickets        AS "Critical",
+                        high_severity_tickets   AS "High Severity",
+                        warranty_claims         AS "Warranty Claims",
+                        critical_pct            AS "Critical %",
+                        warranty_pct            AS "Warranty %"
+                    FROM marts.mart_team_workload {month_w}
+                    ORDER BY 2 DESC, 1
+                """, month_params).df()
+
+                export_dealer_df = con.execute(f"""
+                    SELECT
+                        dealer_label            AS "Dealer",
+                        dealer_country          AS "Country",
+                        created_month           AS "Month",
+                        total_tickets           AS "Total Tickets",
+                        closed_tickets          AS "Closed",
+                        distinct_vehicles       AS "Vehicles",
+                        sla_breached_tickets    AS "SLA Breached",
+                        sla_breach_rate_pct     AS "SLA Breach %",
+                        avg_resolution_hours    AS "Avg Resolution (h)",
+                        warranty_rate_pct       AS "Warranty %"
+                    FROM marts.mart_dealer_performance
+                    {month_w}
+                    ORDER BY 3 DESC, 1
+                """, month_params).df()
+
+                export_product_df = con.execute("""
+                    SELECT
+                        product_family          AS "Product Family",
+                        component_name          AS "Component",
+                        fault_mode              AS "Fault Mode",
+                        total_tickets           AS "Total Tickets",
+                        affected_vehicles       AS "Vehicles",
+                        critical_rate_pct       AS "Critical %",
+                        warranty_rate_pct       AS "Warranty %",
+                        avg_resolution_hours    AS "Avg Resolution (h)",
+                        median_resolution_hours AS "Median Resolution (h)"
+                    FROM marts.mart_product_defects
+                    ORDER BY total_tickets DESC
+                """).df()
+
+                st.session_state["_export_dfs"] = {
+                    "raw":     raw_df,
+                    "team":    export_team_df,
+                    "dealer":  export_dealer_df,
+                    "product": export_product_df,
+                }
+                st.session_state["_export_cache_key"] = export_cache_key
+            st.rerun()
+        con.close()
+        return
+
     con.close()
 
-    output = io.BytesIO()
+    raw_df            = st.session_state["_export_dfs"]["raw"]
+    export_team_df    = st.session_state["_export_dfs"]["team"]
+    export_dealer_df  = st.session_state["_export_dfs"]["dealer"]
+    export_product_df = st.session_state["_export_dfs"]["product"]
+
     summary_data = {
         "Metric": ["Total Tickets", "Open Tickets", "Closed Tickets",
                    "Avg Resolution Time", "SLA Breach Rate"],
@@ -1267,16 +1398,48 @@ def show_kpi_analytics() -> None:
             f"{sla_pct:.1f}%" if sla_pct is not None else "—",
         ],
     }
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary", index=False)
-        raw_df.to_excel(writer, sheet_name="Ticket Detail", index=False)
-    output.seek(0)
-    st.download_button(
-        label="Download KPI Report (Excel)",
-        data=output,
-        file_name="support_ticket_kpi.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+
+    export_col1, export_col2 = st.columns(2)
+
+    # ── Excel: all sheets in one workbook ─────────────────────────────────────
+    with export_col1:
+        st.markdown("**Excel workbook** — all marts in separate sheets")
+        excel_buf = io.BytesIO()
+        with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+            pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary",         index=False)
+            raw_df.to_excel(                     writer, sheet_name="Ticket Detail",   index=False)
+            export_team_df.to_excel(             writer, sheet_name="Team Workload",   index=False)
+            export_dealer_df.to_excel(           writer, sheet_name="Dealer Perf",     index=False)
+            export_product_df.to_excel(          writer, sheet_name="Product Defects", index=False)
+        excel_buf.seek(0)
+        st.download_button(
+            label=f"Download KPI Report (.xlsx) — {len(raw_df):,} tickets, 5 sheets",
+            data=excel_buf,
+            file_name="support_ticket_kpi.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    # ── CSV: individual downloads per table ───────────────────────────────────
+    with export_col2:
+        st.markdown("**CSV** — choose a table to download")
+        csv_choice = st.selectbox(
+            "Table",
+            ["Ticket Detail", "Team Workload", "Dealer Performance", "Product Defects"],
+            label_visibility="collapsed",
+        )
+        csv_map = {
+            "Ticket Detail":      (raw_df,             "ticket_detail.csv"),
+            "Team Workload":      (export_team_df,     "team_workload.csv"),
+            "Dealer Performance": (export_dealer_df,   "dealer_performance.csv"),
+            "Product Defects":    (export_product_df,  "product_defects.csv"),
+        }
+        csv_df, csv_filename = csv_map[csv_choice]
+        st.download_button(
+            label=f"Download {csv_choice} (.csv) — {len(csv_df):,} rows",
+            data=csv_df.to_csv(index=False).encode("utf-8"),
+            file_name=csv_filename,
+            mime="text/csv",
+        )
 
 
 def show_model_explainability() -> None:
@@ -1332,7 +1495,6 @@ def show_model_explainability() -> None:
 
     with col_cm:
         if cm and class_names:
-            import numpy as np
             cm_arr = np.array(cm)
             # Normalise rows so colours show recall per class
             row_sums = cm_arr.sum(axis=1, keepdims=True).clip(1)
@@ -1551,10 +1713,10 @@ def show_sql_explorer() -> None:
 
     starter_queries = {
         "Tickets per team": "SELECT assigned_team, COUNT(*) AS tickets\nFROM tickets\nGROUP BY assigned_team\nORDER BY tickets DESC",
-        "Avg resolution by severity": "SELECT severity, ROUND(AVG(CAST(time_to_close_seconds AS REAL)) / 3600, 1) AS avg_hours\nFROM tickets\nWHERE time_to_close_seconds != ''\nGROUP BY severity\nORDER BY avg_hours DESC",
-        "Escalated tickets by region": "SELECT region, COUNT(*) AS escalated\nFROM tickets\nWHERE status = 'Escalated'\nGROUP BY region\nORDER BY escalated DESC",
+        "Avg resolution by severity": "SELECT severity, ROUND(AVG(time_to_close_seconds) / 3600.0, 1) AS avg_hours\nFROM tickets\nWHERE time_to_close_seconds IS NOT NULL\nGROUP BY severity\nORDER BY avg_hours DESC",
+        "Open tickets by region": "SELECT region, COUNT(*) AS open_tickets\nFROM tickets\nWHERE status = 'Open'\nGROUP BY region\nORDER BY open_tickets DESC",
         "Top failure modes": "SELECT failure_mode, COUNT(*) AS count\nFROM tickets\nGROUP BY failure_mode\nORDER BY count DESC\nLIMIT 10",
-        "Open critical tickets": "SELECT ticket_id, description, assigned_team, creation_date\nFROM tickets\nWHERE severity = 'Critical' AND status NOT IN ('Resolved', 'Closed')\nLIMIT 20",
+        "Open critical tickets": "SELECT ticket_id, description, assigned_team, creation_date\nFROM tickets\nWHERE severity = 'Critical' AND status = 'Open'\nLIMIT 20",
     }
 
     selected = st.selectbox("Starter queries", ["(write your own)"] + list(starter_queries.keys()))

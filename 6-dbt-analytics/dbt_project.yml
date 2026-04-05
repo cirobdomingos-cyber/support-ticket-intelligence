@@ -40,6 +40,17 @@ models:
       +materialized: table
       +schema: marts
 
+# ---------------------------------------------------------------------------
+# SLA thresholds (hours) — single source of truth for SLA breach logic.
+# Change here and rebuild; the intermediate model picks up the new values.
+# ---------------------------------------------------------------------------
+vars:
+  sla_hours:
+    Critical: 24
+    High:     48
+    Medium:   72
+    Low:      96
+
 # Seed configuration — raw CSV loaded via `dbt seed`
 seeds:
   support_analytics:
