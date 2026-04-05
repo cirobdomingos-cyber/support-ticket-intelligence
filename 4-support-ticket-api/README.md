@@ -142,7 +142,7 @@ Set these in Railway service Variables to enable AI suggestions.
 ```env
 HUGGINGFACEHUB_API_TOKEN=your_huggingface_token
 HUGGINGFACE_PROVIDER=hf-inference
-HUGGINGFACE_REPO_ID=Qwen/Qwen2.5-7B-Instruct-1M
+HUGGINGFACE_REPO_ID=Qwen/Qwen2.5-7B-Instruct
 ```
 
 You can create a free token at huggingface.co/settings/tokens.
