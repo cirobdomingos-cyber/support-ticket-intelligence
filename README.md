@@ -3,7 +3,7 @@
 [![CI](https://github.com/cirobdomingos-cyber/support-ticket-intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/cirobdomingos-cyber/support-ticket-intelligence/actions/workflows/ci.yml)
 
 > End-to-end AI prototype that automates support ticket routing, surfaces similar past cases,
-> and drafts agent responses. Deploys to Railway with one config file.
+> and drafts agent responses. Runs locally with one command (see Quick Start); Dockerfiles and a Railway config are included for a cloud deploy.
 
 ---
 
@@ -171,7 +171,7 @@ cd 5-support-ticket-dashboard && streamlit run app.py
 
 | Environment variable | Default | Description |
 |---|---|---|
-| `API_URL` | (Railway internal URL) | Dashboard → API URL |
+| `API_URL` | `http://localhost:8000` | Dashboard → API URL (set to the API service URL when deployed) |
 | `HUGGINGFACEHUB_API_TOKEN` | — | Required to enable AI Suggestions |
 | `HUGGINGFACE_REPO_ID` | `mistralai/Mistral-7B-Instruct-v0.2` | LLM model for suggestions |
 
