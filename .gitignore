@@ -74,3 +74,5 @@ sample_dataset.csv
 
 # Claude local settings
 .claude/settings.local.json
+
+.claude/worktrees/
